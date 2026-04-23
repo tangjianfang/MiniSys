@@ -53,7 +53,7 @@ bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
     hInst_ = hInst;
     INITCOMMONCONTROLSEX icc{ sizeof(icc),
         ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES |
-        ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES };
+        ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_TREEVIEW_CLASSES };
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXW wc{ sizeof(wc) };
@@ -213,10 +213,11 @@ void MainWindow::OnCreate() {
     hStatus_ = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
         WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_STATUSBAR), hInst_, nullptr);
+    // Progress bar is a child of hwnd_ (not hStatus_) so PBM_SETMARQUEE works reliably.
     hProgress_ = CreateWindowExW(0, PROGRESS_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-        0, 0, 0, 0, hStatus_, reinterpret_cast<HMENU>(IDC_PROGRESSBAR), hInst_, nullptr);
-    SendMessageW(hProgress_, PBM_SETMARQUEE, FALSE, 0);
+        WS_CHILD | PBS_SMOOTH | PBS_MARQUEE,
+        0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_PROGRESSBAR), hInst_, nullptr);
+    SendMessageW(hProgress_, PBM_SETRANGE32, 0, 100);
 
     // ---- LargeFiles settings panel (hidden by default) ----
     hLblMinSize_    = CreateWindowExW(0, L"STATIC", L"最小大小:",
@@ -297,29 +298,33 @@ void MainWindow::OnSize() {
     SetWindowPos(hBtnSortSize_,nullptr,pad + 4*(btnW + pad)+40,btnY, btnW, btnH, SWP_NOZORDER);
     SetWindowPos(hBtnSortTime_,nullptr,pad + 5*(btnW + pad)+40,btnY, btnW, btnH, SWP_NOZORDER);
 
-    // LargeFiles settings row (below main buttons)
-    int settingsY = btnY + btnH + pad;
+    // LargeFiles settings row — only rendered when LargeFiles tab is active.
+    bool showSettings = (CurrentTab() == TabId::LargeFiles);
     constexpr int editH   = 24;
     constexpr int lblH    = 22;
-    constexpr int editW   = 70;   // size edit
-    constexpr int editW2  = 200;  // filetype edit
-    constexpr int editW3  = 80;   // drives edit
-    constexpr int lblW1   = 76;
-    constexpr int lblW2   = 150;
-    constexpr int lblW3   = 190;
-    int sx = pad;
-    // "最小大小:" [edit] "MB"   "文件类型:" [edit]   "扫描磁盘:" [edit]
-    SetWindowPos(hLblMinSize_,    nullptr, sx,                         settingsY+1, lblW1,  lblH, SWP_NOZORDER);
-    SetWindowPos(hEditMinSize_,   nullptr, sx+lblW1+4,                 settingsY,   editW,  editH, SWP_NOZORDER);
-    SetWindowPos(hLblMinSizeUnit_,nullptr, sx+lblW1+4+editW+4,         settingsY+1, 28,     lblH, SWP_NOZORDER);
-    sx = sx + lblW1+4+editW+4+28+12;
-    SetWindowPos(hLblFileType_,   nullptr, sx,                         settingsY+1, lblW2,  lblH, SWP_NOZORDER);
-    SetWindowPos(hEditFileType_,  nullptr, sx+lblW2+4,                 settingsY,   editW2, editH, SWP_NOZORDER);
-    sx = sx + lblW2+4+editW2+12;
-    SetWindowPos(hLblDrives_,     nullptr, sx,                         settingsY+1, lblW3,  lblH, SWP_NOZORDER);
-    SetWindowPos(hEditDrives_,    nullptr, sx+lblW3+4,                 settingsY,   editW3, editH, SWP_NOZORDER);
+    int settingsRowH = showSettings ? (editH + pad) : 0;
 
-    int infoY = settingsY + editH + pad;
+    if (showSettings) {
+        constexpr int editW   = 70;
+        constexpr int editW2  = 200;
+        constexpr int editW3  = 80;
+        constexpr int lblW1   = 76;
+        constexpr int lblW2   = 150;
+        constexpr int lblW3   = 190;
+        int settingsY = btnY + btnH + pad;
+        int sx = pad;
+        SetWindowPos(hLblMinSize_,    nullptr, sx,              settingsY+1, lblW1,  lblH, SWP_NOZORDER);
+        SetWindowPos(hEditMinSize_,   nullptr, sx+lblW1+4,      settingsY,   editW,  editH, SWP_NOZORDER);
+        SetWindowPos(hLblMinSizeUnit_,nullptr, sx+lblW1+4+editW+4, settingsY+1, 28, lblH, SWP_NOZORDER);
+        sx = sx + lblW1+4+editW+4+28+12;
+        SetWindowPos(hLblFileType_,   nullptr, sx,              settingsY+1, lblW2,  lblH, SWP_NOZORDER);
+        SetWindowPos(hEditFileType_,  nullptr, sx+lblW2+4,      settingsY,   editW2, editH, SWP_NOZORDER);
+        sx = sx + lblW2+4+editW2+12;
+        SetWindowPos(hLblDrives_,     nullptr, sx,              settingsY+1, lblW3,  lblH, SWP_NOZORDER);
+        SetWindowPos(hEditDrives_,    nullptr, sx+lblW3+4,      settingsY,   editW3, editH, SWP_NOZORDER);
+    }
+
+    int infoY = btnY + btnH + pad + settingsRowH;
     SetWindowPos(hInfoLabel_, nullptr, pad, infoY, W - 2*pad, 20, SWP_NOZORDER);
 
     int contentY = infoY + 24;
@@ -327,9 +332,10 @@ void MainWindow::OnSize() {
     SetWindowPos(hList_,     nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
     SetWindowPos(hTreeView_, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
 
-    // Progress bar inside status bar
-    RECT pr; pr.left = W - 240; pr.top = 2; pr.right = W - 24; pr.bottom = statusH - 2;
-    SetWindowPos(hProgress_, nullptr, pr.left, pr.top, pr.right - pr.left, pr.bottom - pr.top, SWP_NOZORDER);
+    // Progress bar: position it over the right side of the status bar area.
+    int sbTop = H;  // status bar starts at H (below content)
+    int prgW = 220, prgH = statusH - 4;
+    SetWindowPos(hProgress_, nullptr, W - prgW - 4, sbTop + 2, prgW, prgH, SWP_NOZORDER);
 }
 
 TabId MainWindow::CurrentTab() const {
@@ -394,6 +400,8 @@ void MainWindow::OnTabChanged() {
     }
     if (!isFolderTree) RefreshListView();
     UpdateStatusBar();
+    // Re-layout for the new tab (settings row shown/hidden dynamically).
+    OnSize();
 }
 
 void MainWindow::RefreshListView() {
@@ -454,7 +462,6 @@ void MainWindow::UpdateStatusBar() {
         }
     }
     SendMessageW(hStatus_, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(msg.c_str()));
-    SendMessageW(hProgress_, PBM_SETMARQUEE, scanning_.load(), 30);
 }
 
 void MainWindow::AppendLog(const std::wstring& msg) {
@@ -554,6 +561,10 @@ void MainWindow::StartScannerAsync(std::unique_ptr<Scanner> scanner) {
         std::lock_guard<std::mutex> g(progressMu_);
         scanProgressText_ = L"扫描中…";
     }
+    // Disable scan button and show progress bar while scanning.
+    EnableWindow(hScan_, FALSE);
+    ShowWindow(hProgress_, SW_SHOW);
+    SendMessageW(hProgress_, PBM_SETMARQUEE, TRUE, 25);
     UpdateStatusBar();
 
     HWND hwnd = hwnd_;
@@ -584,15 +595,24 @@ void MainWindow::OnScanDone() {
     if (t < TabId::History) {
         tabResults_[static_cast<size_t>(t)] = std::move(scanBuffer_);
     }
+    size_t resultCount = (t < TabId::History)
+        ? tabResults_[static_cast<size_t>(t)].size() : 0;
     {
         std::lock_guard<std::mutex> g(progressMu_);
-        scanProgressText_ = FormatW(L"扫描完成: %zu 项",
-            tabResults_[static_cast<size_t>(t)].size());
+        scanProgressText_ = FormatW(L"扫描完成: %zu 项", resultCount);
     }
+    // Re-enable scan button and hide progress bar.
+    EnableWindow(hScan_, TRUE);
+    SendMessageW(hProgress_, PBM_SETMARQUEE, FALSE, 0);
+    ShowWindow(hProgress_, SW_HIDE);
+
     if (t == TabId::FolderTree) {
         BuildFolderTree();
     } else {
         RefreshListView();
+        if (resultCount == 0 && t != TabId::History) {
+            SetWindowTextW(hInfoLabel_, L"✓ 未发现可处理项，系统状况良好。");
+        }
     }
     UpdateStatusBar();
 }
