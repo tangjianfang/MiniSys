@@ -8,6 +8,14 @@
 
 namespace minisys {
 
+// v2 risk classification. Junk rules map to a level; InfoOnly items are
+// display-only and never executable.
+enum class RiskLevel { Safe = 0, Cautious = 1, Advanced = 2, InfoOnly = 3 };
+
+// Execution strategy carried by ScanItem (M3). Delegate items run a system
+// command (DISM / powercfg / cleanmgr) instead of a file operation.
+enum class CleanStrategy { Quarantine, Delegate, InfoOnly };
+
 // A single result item produced by a Scanner.
 struct ScanItem {
     std::wstring        category;     // e.g. "Browser Cache", "Video", "App: Notepad++"
@@ -19,6 +27,14 @@ struct ScanItem {
     bool                recommended = true;  // pre-checked in UI
     bool                dangerous   = false; // require extra confirmation
     std::wstring        groupKey;     // for dedup grouping
+
+    // v2 fields (M0): rule provenance, re-verification data, risk level.
+    std::wstring        ruleId;       // junk rule that produced this item ("" if none)
+    uint64_t            lastWriteFiletime = 0; // for pre-execution re-verification
+    RiskLevel           riskLevel = RiskLevel::Cautious;
+    // v2 (M3): execution strategy + delegate command (from the rule table).
+    CleanStrategy       strategy = CleanStrategy::Quarantine;
+    std::wstring        command;      // Delegate strategy only
 };
 
 // Progress callback: (current, total, message). total may be 0 if unknown.

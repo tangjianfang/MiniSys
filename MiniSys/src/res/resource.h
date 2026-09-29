@@ -30,10 +30,14 @@
 #define IDC_BTN_SORT_SIZE           2016
 #define IDC_BTN_SORT_TIME           2017
 
+// History tab
+#define IDC_BTN_EMPTY_Q             2018  // 清空隔离区
+
 // Custom messages
 #define WM_APP_SCAN_PROGRESS        (WM_APP + 1)
 #define WM_APP_SCAN_DONE            (WM_APP + 2)
 #define WM_APP_OP_DONE              (WM_APP + 3)
+#define WM_APP_OP_PROGRESS          (WM_APP + 4)
 
 // Context menu
 #define IDM_CTX_DELETE              3001

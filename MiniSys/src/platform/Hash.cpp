@@ -78,4 +78,55 @@ std::wstring Sha256OfFileHead(const std::filesystem::path& p, unsigned long long
     return r;
 }
 
+namespace {
+
+std::wstring HexOfHash(const std::vector<UCHAR>& out) {
+    static const wchar_t* hex = L"0123456789abcdef";
+    std::wstring r;
+    r.reserve(out.size() * 2);
+    for (UCHAR b : out) {
+        r += hex[b >> 4];
+        r += hex[b & 0xF];
+    }
+    return r;
+}
+
+bool BufferSha256(const void* data, size_t bytes, std::vector<UCHAR>& out) {
+    AlgGuard alg;
+    if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&alg.h, BCRYPT_SHA256_ALGORITHM, nullptr, 0)))
+        return false;
+    DWORD hashObjLen = 0, cb = 0;
+    if (!NT_SUCCESS(BCryptGetProperty(alg.h, BCRYPT_OBJECT_LENGTH,
+            (PUCHAR)&hashObjLen, sizeof(hashObjLen), &cb, 0))) return false;
+    DWORD hashLen = 0;
+    if (!NT_SUCCESS(BCryptGetProperty(alg.h, BCRYPT_HASH_LENGTH,
+            (PUCHAR)&hashLen, sizeof(hashLen), &cb, 0))) return false;
+    std::vector<UCHAR> hashObj(hashObjLen);
+    HashGuard hg;
+    if (!NT_SUCCESS(BCryptCreateHash(alg.h, &hg.h, hashObj.data(), hashObjLen,
+            nullptr, 0, 0))) return false;
+    if (!NT_SUCCESS(BCryptHashData(hg.h, (PUCHAR)data,
+            static_cast<ULONG>(bytes), 0))) return false;
+    out.assign(hashLen, 0);
+    return NT_SUCCESS(BCryptFinishHash(hg.h, out.data(), hashLen, 0));
+}
+
+} // namespace
+
+std::wstring Sha256OfBuffer(const void* data, size_t bytes) {
+    std::vector<UCHAR> out;
+    if (!BufferSha256(data, bytes, out)) return {};
+    return HexOfHash(out);
+}
+
+uint64_t Hash64OfBuffer(const void* data, size_t bytes) {
+    std::vector<UCHAR> out;
+    if (!BufferSha256(data, bytes, out) || out.size() < 8) return 0;
+    uint64_t h = 0;
+    for (int i = 0; i < 8; ++i) {
+        h = (h << 8) | out[i];
+    }
+    return h;
+}
+
 } // namespace minisys

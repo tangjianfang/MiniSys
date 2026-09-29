@@ -1,23 +1,16 @@
-﻿#include "core/DeleteOp.h"
+#include "core/DeleteOp.h"
+
 #include "core/OperationLog.h"
+#include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
-#include "util/Logger.h"
 
 #include <windows.h>
+#include <shobjidl.h>
+#include <shellapi.h>
 #include <shellapi.h>
 
 namespace minisys {
-
-namespace {
-// SHFileOperationW expects double-null-terminated path.
-std::wstring DoubleNull(const std::wstring& s) {
-    std::wstring r = s;
-    r.push_back(L'\0');
-    r.push_back(L'\0');
-    return r;
-}
-} // namespace
 
 DeleteOp::DeleteOp(std::filesystem::path path, unsigned long long sizeBytes) : path_(std::move(path)) {
     rec_.id = OperationLog::NewId();
@@ -28,15 +21,50 @@ DeleteOp::DeleteOp(std::filesystem::path path, unsigned long long sizeBytes) : p
 }
 
 bool DeleteOp::Execute(std::wstring& errOut) {
-    auto buf = DoubleNull(path_.wstring());
-    SHFILEOPSTRUCTW op{};
-    op.wFunc = FO_DELETE;
-    op.pFrom = buf.c_str();
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT |
-                FOF_NOCONFIRMMKDIR | FOF_NO_UI;
-    int r = SHFileOperationW(&op);
-    if (r != 0 || op.fAnyOperationsAborted) {
-        errOut = FormatW(L"SHFileOperation FO_DELETE failed (code %d)", r);
+    // M1: migrated from deprecated SHFileOperationW to IFileOperation
+    // (DESIGN-v2 R-006). Delete-to-recycle-bin via the shell COM API.
+    IFileOperation* pfo = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&pfo));
+    if (FAILED(hr)) {
+        errOut = FormatW(L"CoCreateInstance(FileOperation) failed (0x%08lX)", hr);
+        rec_.status = OpStatus::Failed;
+        rec_.note = errOut;
+        OperationLog::Instance().Append(rec_);
+        return false;
+    }
+
+    bool ok = false;
+    IShellItem* item = nullptr;
+    hr = SHCreateItemFromParsingName(LongPath(path_).c_str(), nullptr,
+                                      IID_PPV_ARGS(&item));
+    if (SUCCEEDED(hr)) {
+        pfo->SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT |
+                               FOF_NOERRORUI | FOFX_RECYCLEONDELETE);
+        hr = pfo->DeleteItem(item, nullptr);
+        item->Release();
+        if (SUCCEEDED(hr)) {
+            hr = pfo->PerformOperations();
+            if (SUCCEEDED(hr)) {
+                BOOL aborted = FALSE;
+                pfo->GetAnyOperationsAborted(&aborted);
+                if (aborted) {
+                    errOut = L"操作被中止";
+                } else {
+                    ok = true;
+                }
+            } else {
+                errOut = FormatW(L"IFileOperation::PerformOperations failed (0x%08lX)", hr);
+            }
+        } else {
+            errOut = FormatW(L"IFileOperation::DeleteItem failed (0x%08lX)", hr);
+        }
+    } else {
+        errOut = FormatW(L"SHCreateItemFromParsingName failed (0x%08lX)", hr);
+    }
+    pfo->Release();
+
+    if (!ok) {
         rec_.status = OpStatus::Failed;
         rec_.note = errOut;
         OperationLog::Instance().Append(rec_);
@@ -48,10 +76,10 @@ bool DeleteOp::Execute(std::wstring& errOut) {
 }
 
 bool DeleteOp::Undo(std::wstring& errOut) {
-    // Restore-from-recycle is non-trivial without storing the recycle bin item id.
-    // For v1 we instruct user to restore manually from the Recycle Bin shell folder.
-    errOut = L"Auto-undo not implemented in v1. Open Recycle Bin and restore '"
-             + path_.filename().wstring() + L"' manually.";
+    // Restore-from-recycle needs the recycle bin item id; from v2 on, the
+    // default delete path is QuarantineOp (fully reversible). This optional
+    // strategy still requires a manual restore.
+    errOut = L"回收站删除请从回收站手动还原（默认策略已改为隔离区，可自动撤销）";
     return false;
 }
 

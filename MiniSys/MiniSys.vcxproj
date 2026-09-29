@@ -57,8 +57,12 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>comctl32.lib;shell32.lib;shlwapi.lib;advapi32.lib;ole32.lib;uuid.lib;bcrypt.lib;rstrtmgr.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;shell32.lib;shlwapi.lib;advapi32.lib;ole32.lib;uuid.lib;bcrypt.lib;rstrtmgr.lib;user32.lib;gdi32.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)rules.json" "$(OutDir)rules.json"</Command>
+      <Message>Deploying rules.json</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -81,12 +85,23 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>comctl32.lib;shell32.lib;shlwapi.lib;advapi32.lib;ole32.lib;uuid.lib;bcrypt.lib;rstrtmgr.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;shell32.lib;shlwapi.lib;advapi32.lib;ole32.lib;uuid.lib;bcrypt.lib;rstrtmgr.lib;user32.lib;gdi32.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)rules.json" "$(OutDir)rules.json"</Command>
+      <Message>Deploying rules.json</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\MainWindow.cpp" />
+    <ClCompile Include="src\core\SessionService.cpp" />
+    <ClCompile Include="src\core\PlanBuilder.cpp" />
+    <ClCompile Include="src\core\GuardRails.cpp" />
+    <ClCompile Include="src\core\QuarantineOp.cpp" />
+    <ClCompile Include="src\core\JunkRules.cpp" />
+    <ClCompile Include="src\core\VolumeIndex.cpp" />
+    <ClCompile Include="src\core\DelegateOp.cpp" />
     <ClCompile Include="src\core\JunkScanner.cpp" />
     <ClCompile Include="src\core\LargeFileScanner.cpp" />
     <ClCompile Include="src\core\AppScanner.cpp" />
@@ -95,16 +110,29 @@
     <ClCompile Include="src\core\MoveJunctionOp.cpp" />
     <ClCompile Include="src\core\OperationLog.cpp" />
     <ClCompile Include="src\platform\Junction.cpp" />
+    <ClCompile Include="src\platform\CrashDump.cpp" />
     <ClCompile Include="src\platform\Hash.cpp" />
     <ClCompile Include="src\platform\Privilege.cpp" />
     <ClCompile Include="src\util\Logger.cpp" />
+    <ClCompile Include="src\util\Json.cpp" />
     <ClCompile Include="src\util\PathUtils.cpp" />
     <ClCompile Include="src\util\StringUtils.cpp" />
     <ClCompile Include="src\util\FastWalk.cpp" />
+    <ClCompile Include="src\ui\Presenters.cpp" />
+    <ClCompile Include="src\ui\Layout.cpp" />
+    <ClCompile Include="src\ui\Controls.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\MainWindow.h" />
+    <ClInclude Include="src\core\TabId.h" />
     <ClInclude Include="src\core\Scanner.h" />
+    <ClInclude Include="src\core\SessionService.h" />
+    <ClInclude Include="src\core\PlanBuilder.h" />
+    <ClInclude Include="src\core\GuardRails.h" />
+    <ClInclude Include="src\core\QuarantineOp.h" />
+    <ClInclude Include="src\core\JunkRules.h" />
+    <ClInclude Include="src\core\VolumeIndex.h" />
+    <ClInclude Include="src\core\DelegateOp.h" />
     <ClInclude Include="src\core\JunkScanner.h" />
     <ClInclude Include="src\core\LargeFileScanner.h" />
     <ClInclude Include="src\core\AppScanner.h" />
@@ -114,12 +142,18 @@
     <ClInclude Include="src\core\MoveJunctionOp.h" />
     <ClInclude Include="src\core\OperationLog.h" />
     <ClInclude Include="src\platform\Junction.h" />
+    <ClInclude Include="src\platform\CrashDump.h" />
     <ClInclude Include="src\platform\Hash.h" />
     <ClInclude Include="src\platform\Privilege.h" />
     <ClInclude Include="src\util\Logger.h" />
+    <ClInclude Include="src\util\Json.h" />
     <ClInclude Include="src\util\PathUtils.h" />
     <ClInclude Include="src\util\StringUtils.h" />
     <ClInclude Include="src\util\FastWalk.h" />
+    <ClInclude Include="src\ui\UiHandles.h" />
+    <ClInclude Include="src\ui\Presenters.h" />
+    <ClInclude Include="src\ui\Layout.h" />
+    <ClInclude Include="src\ui\Controls.h" />
     <ClInclude Include="src\res\resource.h" />
   </ItemGroup>
   <ItemGroup>

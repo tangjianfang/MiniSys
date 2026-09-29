@@ -1,7 +1,10 @@
-﻿#include "core/JunkScanner.h"
+#include "core/JunkScanner.h"
+
+#include "core/JunkRules.h"
+#include "core/VolumeIndex.h"
+#include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
-#include "util/Logger.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -10,7 +13,6 @@
 #include <mutex>
 #include <thread>
 #include <vector>
-#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -18,106 +20,190 @@ namespace minisys {
 
 namespace {
 
-struct Rule {
-    const wchar_t* category;
-    const wchar_t* title;
-    fs::path       path;          // resolved at runtime
-    bool           recurseChildrenOnly = false; // if true, scan immediate sub-dirs
-    bool           dangerous = false;
+struct Candidate {
+    const JunkRule* rule = nullptr;
+    fs::path path;
+    unsigned long long sizeBytes = 0;   // known for files, computed for dirs
+    uint64_t lastWriteFiletime = 0;
+    bool isFile = false;
 };
 
-fs::path Env(const wchar_t* var) {
-    wchar_t buf[MAX_PATH * 2] = {};
-    DWORD n = GetEnvironmentVariableW(var, buf, _countof(buf));
-    if (n == 0 || n >= _countof(buf)) return {};
-    return buf;
+// Raw FILETIME now (100-ns ticks).
+uint64_t NowFiletime() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
-void AddIfExists(std::vector<Rule>& rules, Rule r) {
-    if (!r.path.empty() && (DirExists(r.path) || FileExists(r.path))) {
-        rules.push_back(std::move(r));
+bool QueryCandidate(const fs::path& p, Candidate& c) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(LongPath(p).c_str(), GetFileExInfoStandard, &fad)) {
+        return false;
     }
+    if (fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return false;
+    c.isFile = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    c.sizeBytes = (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
+                  static_cast<unsigned long long>(fad.nFileSizeLow);
+    c.lastWriteFiletime =
+        (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+        static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+    return true;
 }
 
-std::vector<Rule> BuildRules() {
-    std::vector<Rule> rules;
-    auto sysRoot = Env(L"SystemRoot");
-    auto userTemp = Env(L"TEMP");
-    auto localApp = Env(L"LOCALAPPDATA");
-    auto roamingApp = Env(L"APPDATA");
+bool PassesAgeFilter(const JunkRule& rule, const Candidate& c) {
+    if (rule.minAgeDays <= 0 || c.lastWriteFiletime == 0) return true;
+    uint64_t now = NowFiletime();
+    if (c.lastWriteFiletime > now) return true;   // future mtime: keep
+    uint64_t age100ns = now - c.lastWriteFiletime;
+    uint64_t ageDays = age100ns / (24ULL * 3600ULL * 10000000ULL);
+    return ageDays >= static_cast<uint64_t>(rule.minAgeDays);
+}
 
-    AddIfExists(rules, {L"System Temp", L"User Temp Folder",  userTemp, false, false});
-    if (!sysRoot.empty()) {
-        AddIfExists(rules, {L"System Temp", L"Windows Temp",  sysRoot / L"Temp", false, false});
-        AddIfExists(rules, {L"Windows Update", L"SoftwareDistribution Download Cache",
-                            sysRoot / L"SoftwareDistribution" / L"Download", false, false});
-        AddIfExists(rules, {L"Windows Logs", L"CBS Logs",
-                            sysRoot / L"Logs" / L"CBS", false, false});
-        AddIfExists(rules, {L"Windows Logs", L"DISM Logs",
-                            sysRoot / L"Logs" / L"DISM", false, false});
-        AddIfExists(rules, {L"Windows Logs", L"Minidump",
-                            sysRoot / L"Minidump", false, false});
+std::vector<std::wstring> SplitNames(const std::wstring& s) {
+    std::vector<std::wstring> out;
+    std::wstring cur;
+    for (wchar_t ch : s) {
+        if (ch == L';' || ch == L',') {
+            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+        } else if (ch != L' ') {
+            cur += ch;
+        }
     }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
 
-    // Browser caches
-    if (!localApp.empty()) {
-        AddIfExists(rules, {L"Browser Cache", L"Edge - Cache",
-                            localApp / L"Microsoft" / L"Edge" / L"User Data" / L"Default" / L"Cache", false, false});
-        AddIfExists(rules, {L"Browser Cache", L"Edge - Code Cache",
-                            localApp / L"Microsoft" / L"Edge" / L"User Data" / L"Default" / L"Code Cache", false, false});
-        AddIfExists(rules, {L"Browser Cache", L"Edge - GPUCache",
-                            localApp / L"Microsoft" / L"Edge" / L"User Data" / L"Default" / L"GPUCache", false, false});
+// Expand one rule into concrete candidate paths.
+void ExpandRule(const JunkRule& rule, const fs::path& base,
+                std::vector<Candidate>& out) {
+    switch (rule.mode) {
+        case RuleMode::Subtree: {
+            Candidate c{&rule, base};
+            if (QueryCandidate(base, c) && PassesAgeFilter(rule, c)) {
+                out.push_back(std::move(c));
+            }
+            break;
+        }
+        case RuleMode::Children: {
+            std::wstring search = base.wstring();
+            if (!search.empty() && search.back() != L'\\') search += L'\\';
+            search += L'*';
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileExW(LongPath(search).c_str(),
+                                        FindExInfoBasic, &fd,
+                                        FindExSearchNameMatch, nullptr,
+                                        FIND_FIRST_EX_LARGE_FETCH);
+            if (h == INVALID_HANDLE_VALUE) return;
+            do {
+                const wchar_t* n = fd.cFileName;
+                if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                if (!rule.childPattern.empty() &&
+                    !JunkRules::MatchWildcard(rule.childPattern, n)) {
+                    continue;
+                }
+                fs::path full = base / n;
+                Candidate c{&rule, full};
+                if (QueryCandidate(full, c) && PassesAgeFilter(rule, c)) {
+                    out.push_back(std::move(c));
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+            break;
+        }
+        case RuleMode::Profiles: {
+            // For each direct child dir P of base, for each configured name N,
+            // P\N becomes a candidate (browser multi-profile support).
+            std::wstring search = base.wstring();
+            if (!search.empty() && search.back() != L'\\') search += L'\\';
+            search += L'*';
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileExW(LongPath(search).c_str(),
+                                        FindExInfoBasic, &fd,
+                                        FindExSearchNameMatch, nullptr,
+                                        FIND_FIRST_EX_LARGE_FETCH);
+            if (h == INVALID_HANDLE_VALUE) return;
+            std::vector<fs::path> profileDirs;
+            do {
+                const wchar_t* n = fd.cFileName;
+                if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                profileDirs.push_back(base / n);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
 
-        AddIfExists(rules, {L"Browser Cache", L"Chrome - Cache",
-                            localApp / L"Google" / L"Chrome" / L"User Data" / L"Default" / L"Cache", false, false});
-        AddIfExists(rules, {L"Browser Cache", L"Chrome - Code Cache",
-                            localApp / L"Google" / L"Chrome" / L"User Data" / L"Default" / L"Code Cache", false, false});
-        AddIfExists(rules, {L"Browser Cache", L"Chrome - GPUCache",
-                            localApp / L"Google" / L"Chrome" / L"User Data" / L"Default" / L"GPUCache", false, false});
-    }
-    if (!roamingApp.empty()) {
-        // Firefox caches live under %LOCALAPPDATA%\Mozilla\Firefox\Profiles\<id>\cache2
-        if (!localApp.empty()) {
-            auto base = fs::path(localApp) / L"Mozilla" / L"Firefox" / L"Profiles";
-            std::error_code ec;
-            if (DirExists(base)) {
-                for (auto& e : fs::directory_iterator(base, ec)) {
-                    if (e.is_directory()) {
-                        auto cache = e.path() / L"cache2";
-                        if (DirExists(cache)) {
-                            rules.push_back({L"Browser Cache",
-                                (L"Firefox - " + e.path().filename().wstring()).c_str(),
-                                cache, false, false});
-                        }
+            for (const auto& name : SplitNames(rule.profileNames)) {
+                for (const auto& p : profileDirs) {
+                    fs::path full = p / name;
+                    Candidate c{&rule, full};
+                    if (QueryCandidate(full, c) && PassesAgeFilter(rule, c)) {
+                        out.push_back(std::move(c));
                     }
                 }
             }
+            break;
         }
     }
-    return rules;
 }
 
-void AddInfoOnlyItems(std::vector<ScanItem>& out) {
-    auto sysDrive = SystemDriveRoot();
-    fs::path hib = fs::path(sysDrive) / L"hiberfil.sys";
-    fs::path pg  = fs::path(sysDrive) / L"pagefile.sys";
-    fs::path sw  = fs::path(sysDrive) / L"swapfile.sys";
-    for (auto& p : { hib, pg, sw }) {
-        if (FileExists(p)) {
-            std::error_code ec;
-            auto sz = fs::file_size(p, ec);
-            if (ec) sz = 0;
-            ScanItem it;
-            it.category = L"System Reserved (Info only)";
-            it.title    = p.filename().wstring();
-            it.path     = p;
-            it.sizeBytes = sz;
-            it.detail = L"Cannot delete directly. Use 'powercfg /h off' (hibernate) or System Properties to relocate page file.";
-            it.recommended = false;
-            it.dangerous = true;
-            out.push_back(std::move(it));
+// Indexed rule expansion (M2). Returns true when the index authoritatively
+// handled `base` (including "known absent"); false → caller falls back to the
+// filesystem walk. Directory candidates need no disk I/O at all — file
+// candidates still need one attribute query for their size (ADR-004).
+bool ExpandRuleIndexed(const JunkRule& rule, const fs::path& base,
+                       VolumeIndex& idx, std::vector<Candidate>& out) {
+    auto baseStr = base.wstring();
+
+    auto addEntry = [&](const VolumeIndex::FileEntry& e) {
+        Candidate c{&rule, e.path};
+        if (e.isDirectory) {
+            c.isFile = false;
+            c.lastWriteFiletime = e.lastWrite;
+        } else {
+            // Size is not in USN records — one attribute query per file item.
+            if (!QueryCandidate(e.path, c)) return;
+        }
+        if (PassesAgeFilter(rule, c)) out.push_back(std::move(c));
+    };
+
+    switch (rule.mode) {
+        case RuleMode::Subtree: {
+            VolumeIndex::FileEntry e;
+            if (!idx.TryGetEntry(baseStr, e)) return true;   // known absent
+            addEntry(e);
+            return true;
+        }
+        case RuleMode::Children: {
+            bool known = idx.CollectChildren(baseStr, [&](const VolumeIndex::FileEntry& e) {
+                if (!rule.childPattern.empty() &&
+                    !JunkRules::MatchWildcard(rule.childPattern,
+                                              fs::path(e.path).filename().wstring())) {
+                    return;
+                }
+                addEntry(e);
+            });
+            return known;   // false → base unknown to the index
+        }
+        case RuleMode::Profiles: {
+            std::vector<VolumeIndex::FileEntry> profileDirs;
+            bool known = idx.CollectChildren(baseStr,
+                [&](const VolumeIndex::FileEntry& e) {
+                    if (e.isDirectory) profileDirs.push_back(e);
+                });
+            if (!known) return false;
+            for (const auto& name : SplitNames(rule.profileNames)) {
+                for (const auto& p : profileDirs) {
+                    VolumeIndex::FileEntry e;
+                    if (idx.TryGetEntry(p.path + L"\\" + name, e)) {
+                        addEntry(e);
+                    }
+                }
+            }
+            return true;
         }
     }
+    return false;
 }
 
 } // namespace
@@ -125,38 +211,80 @@ void AddInfoOnlyItems(std::vector<ScanItem>& out) {
 void JunkScanner::Scan(std::vector<ScanItem>& out,
                        ProgressFn progress,
                        const std::atomic<bool>& cancel) {
-    auto rules = BuildRules();
-    std::atomic<unsigned long long> doneCount{0};
-    unsigned long long total = static_cast<unsigned long long>(rules.size()) + 1; // +1 for recycle bin
+    auto rules = JunkRules::Load();
+    if (progress) progress(0, 0, L"加载清理规则");
 
-    // Pre-compute sizes in parallel (each DirectorySize call is independent).
-    std::vector<unsigned long long> sizes(rules.size(), 0);
+    // ---- 0. Shared volume index (M2): build once per session, reuse ----
+    VolumeIndex* idx = nullptr;
     {
+        auto sd = SystemDriveRoot();
+        if (sd.size() >= 2 && sd[1] == L':') {
+            auto& vi = VolumeIndex::Instance();
+            if (vi.EnsureBuilt(sd[0],
+                    [&](const std::wstring& msg) {
+                        if (progress) progress(0, 0, msg);
+                    },
+                    cancel)) {
+                idx = &vi;
+            }
+        }
+    }
+
+    // ---- 1. Expand rules into candidates (existence + age filter) ----
+    std::vector<Candidate> candidates;
+    candidates.reserve(64);
+    for (const auto& rule : rules) {
+        if (cancel.load()) return;
+        auto base = fs::path(JunkRules::ExpandEnv(rule.path));
+        if (base.empty()) continue;
+
+        // Index path first (rules on the indexed volume); fall back to the
+        // filesystem walk for other drives / unknown paths / no index.
+        bool handled = false;
+        if (idx && !base.empty()) {
+            auto bs = base.wstring();
+            if (bs.size() >= 2 && bs[1] == L':' &&
+                ::towupper(bs[0]) == idx->Drive()) {
+                handled = ExpandRuleIndexed(rule, base, *idx, candidates);
+            }
+        }
+        if (!handled) {
+            ExpandRule(rule, base, candidates);
+        }
+    }
+    if (cancel.load()) return;
+
+    // ---- 2. Parallel size computation for directory candidates ----
+    std::vector<Candidate*> dirs;
+    for (auto& c : candidates) {
+        if (!c.isFile) dirs.push_back(&c);
+    }
+    if (!dirs.empty()) {
         unsigned hw = std::thread::hardware_concurrency();
         if (hw == 0) hw = 4;
         int n = static_cast<int>(hw);
         if (n > 8) n = 8;
         if (n < 2) n = 2;
-        if ((int)rules.size() < n) n = (int)rules.size();
-        if (n < 1) n = 1;
+        if (static_cast<int>(dirs.size()) < n) n = static_cast<int>(dirs.size());
         std::atomic<size_t> next{0};
+        std::atomic<size_t> done{0};
         std::vector<std::thread> ts;
-        ts.reserve(n);
         std::mutex pmu;
+        ts.reserve(n);
         for (int t = 0; t < n; ++t) {
             ts.emplace_back([&] {
                 for (;;) {
                     if (cancel.load()) return;
                     size_t i = next.fetch_add(1);
-                    if (i >= rules.size()) return;
-                    const auto& r = rules[i];
+                    if (i >= dirs.size()) return;
+                    dirs[i]->sizeBytes = DirectorySize(dirs[i]->path);
+                    size_t d = done.fetch_add(1) + 1;
                     {
                         std::lock_guard<std::mutex> g(pmu);
-                        if (progress) progress(doneCount.load(), total, r.title);
+                        if (progress) {
+                            progress(d, dirs.size(), dirs[i]->path.filename().wstring());
+                        }
                     }
-                    sizes[i] = DirExists(r.path) ? DirectorySize(r.path)
-                              : (FileExists(r.path) ? fs::file_size(r.path) : 0);
-                    doneCount.fetch_add(1);
                 }
             });
         }
@@ -164,23 +292,47 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
     }
     if (cancel.load()) return;
 
-    for (size_t i = 0; i < rules.size(); ++i) {
-        const auto& r = rules[i];
-        if (sizes[i] == 0) continue;
+    // ---- 3. Emit items ----
+    for (auto& c : candidates) {
+        if (c.sizeBytes == 0) continue;   // nothing to gain
+        const JunkRule& rule = *c.rule;
         ScanItem it;
-        it.category    = r.category;
-        it.title       = r.title;
-        it.path        = r.path;
-        it.sizeBytes   = sizes[i];
-        it.detail      = r.path.wstring();
-        it.recommended = true;
-        it.dangerous   = r.dangerous;
+        it.category = rule.category;
+        switch (rule.mode) {
+            case RuleMode::Subtree:
+                it.title = rule.title;
+                break;
+            case RuleMode::Children:
+                it.title = rule.title + L" — " + c.path.filename().wstring();
+                break;
+            case RuleMode::Profiles:
+                // Distinguish "<profile>\<cache>" pairs.
+                it.title = rule.title + L" — " +
+                           c.path.parent_path().filename().wstring() + L"\\" +
+                           c.path.filename().wstring();
+                break;
+        }
+        it.path        = c.path;
+        it.sizeBytes   = c.sizeBytes;
+        it.lastWriteFiletime = c.lastWriteFiletime;
+        it.ruleId      = rule.id;
+        it.riskLevel   = rule.riskLevel;
+        it.recommended = rule.recommended;
+        it.dangerous   = (rule.riskLevel >= RiskLevel::Advanced) ||
+                         (rule.strategy != CleanStrategy::Quarantine);
+        it.detail      = c.path.wstring();
+        if (!rule.detailHint.empty()) it.detail += L"\n" + rule.detailHint;
+        if (rule.minAgeDays > 0) {
+            it.detail += FormatW(L"\n(仅列出 %d 天未使用的项目)", rule.minAgeDays);
+        }
+        it.strategy    = rule.strategy;
+        it.command     = rule.command;
         out.push_back(std::move(it));
     }
 
-    // Recycle Bin (single shell call, no need to parallelize).
+    // ---- 4. Recycle bin (special item; executed via EmptyRecycleOp) ----
     if (!cancel.load()) {
-        if (progress) progress(doneCount.load(), total, L"Recycle Bin");
+        if (progress) progress(0, 0, L"Recycle Bin");
         RecycleBinInfo info;
         if (QueryRecycleBin(info) && info.sizeBytes > 0) {
             ScanItem it;
@@ -191,13 +343,11 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
             it.detail      = FormatW(L"%llu items — irreversible", info.itemCount);
             it.recommended = false;
             it.dangerous   = true;
+            it.riskLevel   = RiskLevel::Advanced;
             out.push_back(std::move(it));
         }
-        doneCount.fetch_add(1);
     }
-
-    AddInfoOnlyItems(out);
-    if (progress) progress(doneCount.load(), total, L"Done");
+    if (progress) progress(0, 0, L"Done");
 }
 
 } // namespace minisys

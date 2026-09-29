@@ -1,4 +1,5 @@
 ﻿#include "MainWindow.h"
+#include "platform/CrashDump.h"
 #include "platform/Privilege.h"
 #include "util/Logger.h"
 
@@ -8,6 +9,7 @@
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     SetProcessDPIAware();
+    minisys::InstallCrashHandler();
     minisys::Logger::Instance(); // ensure log file open
     MS_LOG_INFO(L"MiniSys starting; elevated=%d", minisys::IsElevated());
     minisys::EnablePrivilege(SE_CREATE_SYMBOLIC_LINK_NAME);

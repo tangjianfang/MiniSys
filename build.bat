@@ -6,7 +6,7 @@ set CONFIG=%1
 set PLATFORM=%2
 
 if "%CONFIG%"==""  set CONFIG=Release
-if "%PLATFORM%"="" set PLATFORM=x64
+if "%PLATFORM%"=="" set PLATFORM=x64
 
 :: Locate MSBuild via vswhere
 set VSWHERE="%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

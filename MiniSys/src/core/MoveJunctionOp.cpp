@@ -1,4 +1,5 @@
 ﻿#include "core/MoveJunctionOp.h"
+#include "core/GuardRails.h"
 #include "core/OperationLog.h"
 #include "platform/Junction.h"
 #include "util/PathUtils.h"
@@ -16,27 +17,9 @@ namespace minisys {
 
 namespace {
 
-const std::vector<fs::path>& ProtectedPaths() {
-    static const std::vector<fs::path> v = []{
-        auto sd = SystemDriveRoot();
-        return std::vector<fs::path>{
-            fs::path(sd) / L"Windows",
-            fs::path(sd) / L"Program Files" / L"WindowsApps",
-            fs::path(sd) / L"ProgramData" / L"Microsoft",
-            fs::path(sd) / L"$Recycle.Bin",
-            fs::path(sd) / L"System Volume Information",
-        };
-    }();
-    return v;
-}
-
+// Protected-path policy now lives in GuardRails (single source of truth).
 bool IsUnderProtected(const fs::path& p) {
-    auto sp = ToLower(p.wstring());
-    for (auto& prot : ProtectedPaths()) {
-        auto sx = ToLower(prot.wstring());
-        if (sp.size() >= sx.size() && sp.compare(0, sx.size(), sx) == 0) return true;
-    }
-    return false;
+    return GuardRails::IsProtectedPath(p);
 }
 
 std::wstring DoubleNull(const std::wstring& s) {
@@ -202,6 +185,24 @@ bool MoveJunctionOp::Execute(std::wstring& errOut) {
         rec_.note = errOut;
         OperationLog::Instance().Append(rec_);
         return false;
+    }
+
+    // 5. Post-migration self-check (M3): the reparse point must resolve back
+    //    to the target we created. A silent mismatch would leave the app
+    //    (or Windows update) reading the wrong directory.
+    {
+        std::wstring resolved;
+        if (!ReadReparseTarget(source_, resolved) ||
+            !IEquals(fs::path(resolved).lexically_normal().wstring(),
+                     fs::path(target_).lexically_normal().wstring())) {
+            errOut = L"Junction created but self-check failed: reparse target is " +
+                     resolved + L" (expected " + target_.wstring() + L")";
+            MS_LOG_ERROR(L"%s", errOut.c_str());
+            rec_.status = OpStatus::Interrupted;
+            rec_.note = errOut;
+            OperationLog::Instance().Append(rec_);
+            return false;
+        }
     }
 
     rec_.status = OpStatus::Success;

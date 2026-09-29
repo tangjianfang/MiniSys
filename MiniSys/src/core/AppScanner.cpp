@@ -86,6 +86,13 @@ void EnumerateHive(const HiveSpec& spec, std::vector<AppInfo>& outApps) {
                (app.installLocation.back() == L'\\' || app.installLocation.back() == L' ')) {
             app.installLocation.pop_back();
         }
+        // UWP / Store apps live under WindowsApps — junction migration would
+        // break their signature and licensing (M3: exclude from migration).
+        if (IEndsWith(app.installLocation, L"\\WindowsApps") ||
+            app.installLocation.find(L"\\WindowsApps\\") != std::wstring::npos) {
+            app.isUWP = true;
+            continue;
+        }
         if (!DirExists(app.installLocation)) continue;
         app.isOnSystemDrive = IsOnSystemDrive(app.installLocation);
         outApps.push_back(std::move(app));

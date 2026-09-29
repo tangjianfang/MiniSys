@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MiniSys", "MiniSys\MiniSys.vcxproj", "{8B4F1A2D-1234-4ABC-9876-1A2B3C4D5E6F}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MiniSysTests", "MiniSysTests\MiniSysTests.vcxproj", "{E5A2C3D4-5678-4DEF-9ABC-2D3E4F5A6B7C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -15,6 +17,10 @@ Global
 		{8B4F1A2D-1234-4ABC-9876-1A2B3C4D5E6F}.Debug|x64.Build.0 = Debug|x64
 		{8B4F1A2D-1234-4ABC-9876-1A2B3C4D5E6F}.Release|x64.ActiveCfg = Release|x64
 		{8B4F1A2D-1234-4ABC-9876-1A2B3C4D5E6F}.Release|x64.Build.0 = Release|x64
+		{E5A2C3D4-5678-4DEF-9ABC-2D3E4F5A6B7C}.Debug|x64.ActiveCfg = Debug|x64
+		{E5A2C3D4-5678-4DEF-9ABC-2D3E4F5A6B7C}.Debug|x64.Build.0 = Debug|x64
+		{E5A2C3D4-5678-4DEF-9ABC-2D3E4F5A6B7C}.Release|x64.ActiveCfg = Release|x64
+		{E5A2C3D4-5678-4DEF-9ABC-2D3E4F5A6B7C}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

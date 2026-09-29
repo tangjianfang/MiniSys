@@ -55,7 +55,10 @@ std::vector<fs::path> DefaultExcludes() {
 }
 
 std::vector<fs::path> DefaultRoots() {
-    return { UserProfileDir(), fs::path(SystemDriveRoot()) };
+    // v2 (R-006 fix): scan the system drive only — the user profile lives
+    // under it, and listing both roots made every profile file appear twice
+    // (duplicate top-N rows + false duplicate pairs).
+    return { fs::path(SystemDriveRoot()) };
 }
 
 struct Entry {
@@ -175,6 +178,7 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
             it.path        = en.path;
             it.sizeBytes   = en.size;
             it.createTime  = en.ctime;
+            it.lastWriteFiletime = en.mtime;   // v2: re-verify on execute
             it.detail      = en.path.parent_path().wstring();
             it.recommended = false;
             out.push_back(std::move(it));

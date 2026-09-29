@@ -11,6 +11,8 @@ enum class OpType {
     EmptyRecycleBin,
     MoveAndJunction,
     MoveFilePath,
+    Quarantine,        // v2: same-volume rename into the quarantine area
+    Delegate,          // v2 (M3): delegated to a system command (DISM/powercfg/…)
 };
 
 enum class OpStatus { Pending, Success, Failed, Reverted, Interrupted };
