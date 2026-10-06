@@ -39,6 +39,7 @@
 // v2.3: instant search tab
 #define IDC_EDIT_SEARCH             2022
 #define IDC_CHK_MATCHPATH           2023
+#define IDC_BTN_QUICKFILTER         2025  // v2.6: quick-filter preset menu
 #define TIMER_SEARCH_DEBOUNCE       2
 #define TIMER_SEARCH_RETRY          3     // retry while a previous search drains
 #define TIMER_IDLE_REFRESH          4     // v2.5: idle-time background rescan
@@ -61,3 +62,20 @@
 
 // Context menu
 #define IDM_CTX_DELETE              3001
+
+// v2.6: search quick-filter presets (popup menu on the search row)
+#define IDM_QF_PDB          3010   // ext:pdb
+#define IDM_QF_OBJ          3011   // ext:obj
+#define IDM_QF_BUILD_TMP    3012   // ext:ilk;idb;tlog;lastbuildstate
+#define IDM_QF_PCH          3013   // ext:ipch;pch
+#define IDM_QF_DIR_DEBUG    3014   // folder:debug
+#define IDM_QF_DIR_RELEASE  3015   // folder:release
+#define IDM_QF_DIR_BIN      3016   // folder:bin
+#define IDM_QF_DIR_OBJ      3017   // folder:obj
+#define IDM_QF_EXE          3018   // ext:exe;msi
+#define IDM_QF_ARCHIVE      3019   // ext:zip;rar;7z
+#define IDM_QF_VIDEO        3020   // ext:mp4;mkv;avi
+#define IDM_QF_IMAGE        3021   // ext:jpg;jpeg;png;bmp
+#define IDM_QF_AUDIO        3022   // ext:mp3;flac;wav
+#define IDM_QF_DOC          3023   // ext:doc;docx;xls;xlsx;pdf
+#define IDM_QF_CLEAR        3024   // strip all filter tokens

@@ -79,6 +79,36 @@ TEST(SearchFilterParsing, NoFilters) {
     EXPECT_EQ(free, L"just words");
 }
 
+// ---- v2.6 quick-filter token composition ------------------------------------
+
+TEST(QueryToggle, ReplacesSameCategory) {
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"foo ext:pdb", L"ext:obj"),
+              L"foo ext:obj");
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"ext:pdb", L"ext:zip;rar"),
+              L"ext:zip;rar");
+}
+
+TEST(QueryToggle, KeepsOtherCategoriesAndFreeText) {
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"a ext:pdb b folder:x", L"ext:ilk"),
+              L"a b folder:x ext:ilk");
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"notes folder:debug", L"ext:pch"),
+              L"notes folder:debug ext:pch");
+}
+
+TEST(QueryToggle, EmptyTokenIsNoOp) {
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"ext:pdb foo", L""),
+              L"ext:pdb foo");
+    // Removing a category is done by selecting a same-category token of
+    // the desired value, or "清除全部过滤" (ParseFilterTerms) in the UI.
+}
+
+TEST(QueryToggle, AppendsWhenAbsent) {
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"", L"folder:debug"),
+              L"folder:debug");
+    EXPECT_EQ(VolumeIndex::ToggleQueryToken(L"readme", L"file:"),
+              L"readme file:");
+}
+
 TEST(SearchFilters, AppliedDuringScan) {
     auto& vi = VolumeIndex::Instance();
     vi.ResetForTesting();

@@ -107,11 +107,16 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.chkMatchPath = CreateWindowExW(0, L"BUTTON", L"匹配完整路径",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_MATCHPATH), inst, nullptr);
+    // v2.6: one-click filter presets (popup menu) — .pdb / .obj / Debug
+    // folders etc. without remembering the query syntax.
+    h.btnQuickFilter = CreateWindowExW(0, L"BUTTON", L"快速筛选 ▾",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_QUICKFILTER), inst, nullptr);
     // REVIEW-UI P2 (L-16): cue banner documents the query syntax right in
     // the box (visible while focused too).
     SendMessageW(h.editSearch, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(
-                     L"输入关键词；folder: / file: / ext:cpp 可加过滤"));
+                     L"输入关键词，或点右侧“快速筛选”一键过滤"));
 
     // ---- Sort buttons (shown for scan result tabs, hidden for History/FolderTree) ----
     h.btnSortSize = CreateWindowExW(0, L"BUTTON", L"按大小排序",
@@ -143,6 +148,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
                       h.lblFileType, h.editFileType,
                       h.lblDrives, h.editDrives,
                       h.lblSearch, h.editSearch, h.chkMatchPath,
+                      h.btnQuickFilter,
                       h.btnSortSize, h.btnSortTime, h.tree, h.about }) {
         SendMessageW(ctl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }

@@ -290,6 +290,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             switch (LOWORD(wp)) {
                 case IDC_BTN_SCAN:    OnScan(); break;
                 case IDC_BTN_EXECUTE: OnExecute(); break;
+                case IDC_BTN_QUICKFILTER:
+                    OnQuickFilterMenu();
+                    break;
                 case IDC_BTN_UNDO:
                     if (CurrentTab() == TabId::History) {
                         static_cast<HistoryPresenter*>(
@@ -483,6 +486,69 @@ TabPresenter* MainWindow::ActivePresenter() const {
     return presenters_[static_cast<size_t>(t)].get();
 }
 
+// v2.6: one-click search filter presets (.pdb / .obj / Debug 文件夹 …).
+// Selecting one rewrites the query's filter token (same category replaced,
+// other categories and free text preserved) and runs the search.
+void MainWindow::OnQuickFilterMenu() {
+    struct QF { int id; const wchar_t* label; const wchar_t* token; };
+    static const QF kPresets[] = {
+        { IDM_QF_PDB,       L"调试符号  .pdb",                          L"ext:pdb" },
+        { IDM_QF_OBJ,       L"编译中间文件  .obj",                       L"ext:obj" },
+        { IDM_QF_BUILD_TMP, L"链接/构建临时  .ilk;.idb;.tlog",          L"ext:ilk;idb;tlog;lastbuildstate" },
+        { IDM_QF_PCH,       L"预编译头  .ipch;.pch",                     L"ext:ipch;pch" },
+        { 0, nullptr, nullptr },
+        { IDM_QF_DIR_DEBUG,   L"Debug 文件夹",   L"folder:debug" },
+        { IDM_QF_DIR_RELEASE, L"Release 文件夹", L"folder:release" },
+        { IDM_QF_DIR_BIN,     L"bin 文件夹",     L"folder:bin" },
+        { IDM_QF_DIR_OBJ,     L"obj 文件夹",     L"folder:obj" },
+        { 0, nullptr, nullptr },
+        { IDM_QF_EXE,     L"安装包/程序  .exe;.msi",   L"ext:exe;msi" },
+        { IDM_QF_ARCHIVE, L"压缩包  .zip;.rar;.7z",    L"ext:zip;rar;7z" },
+        { IDM_QF_VIDEO,   L"视频  .mp4;.mkv;.avi",     L"ext:mp4;mkv;avi" },
+        { IDM_QF_IMAGE,   L"图片  .jpg;.png;.bmp",     L"ext:jpg;jpeg;png;bmp" },
+        { IDM_QF_AUDIO,   L"音频  .mp3;.flac;.wav",    L"ext:mp3;flac;wav" },
+        { IDM_QF_DOC,     L"文档  .doc;.xls;.pdf",     L"ext:doc;docx;xls;xlsx;pdf" },
+        { 0, nullptr, nullptr },
+        { IDM_QF_CLEAR,   L"清除全部过滤条件",  L"" },
+    };
+
+    HMENU m = CreatePopupMenu();
+    for (const auto& p : kPresets) {
+        if (!p.label) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        else          AppendMenuW(m, MF_STRING, p.id, p.label);
+    }
+    RECT rc{};
+    GetWindowRect(h_.btnQuickFilter, &rc);
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                             rc.left, rc.bottom, 0, hwnd_, nullptr);
+    DestroyMenu(m);
+    if (!cmd) return;
+
+    wchar_t buf[512] = {};
+    GetWindowTextW(h_.editSearch, buf, 512);
+    for (const auto& p : kPresets) {
+        if (p.id != cmd) continue;
+        if (cmd == IDM_QF_CLEAR) {
+            // Strip ALL filter tokens, keep the free text.
+            std::wstring free;
+            VolumeIndex::ParseFilterTerms(buf, free);
+            SetWindowTextW(h_.editSearch, free.c_str());
+        } else {
+            SetWindowTextW(h_.editSearch,
+                VolumeIndex::ToggleQueryToken(buf, p.token).c_str());
+        }
+        break;
+    }
+
+    if (taskMode_ == TaskMode::None) {
+        RunSearch();
+    } else {
+        // Index still building (most common busy case here) — OnScanDone
+        // re-applies the (now non-empty) query when it lands.
+        ShowHint(L"ℹ 索引构建中，完成后将自动应用该筛选。");
+    }
+}
+
 // v2.5 cached results: "上次扫描: …" provenance line, judged per tab.
 std::wstring MainWindow::ComposeScanTimeLine() const {
     auto& svc = SessionService::Instance();
@@ -583,8 +649,8 @@ void MainWindow::OnTabChanged() {
         case TabId::Search:
             tabInfoText_ =
                 L"输入即搜（多词为“并且”，支持 * ? 通配符）；双击定位文件，勾选后可移入隔离区。\n"
-                L"· 过滤词（参考 Everything）：folder: 仅文件夹 · file: 仅文件 · ext:cpp;h 按扩展名。\n"
-                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建，结果有变化时自动增量更新。";
+                L"· 点“快速筛选”一键过滤：.pdb / .obj / Debug 文件夹等；手动过滤词：folder: / file: / ext:cpp;h。\n"
+                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；未就绪时自动构建，USN 异常时自动回退遍历（较慢）。";
             break;
         case TabId::LargeFiles:
             tabInfoText_ =
@@ -620,8 +686,12 @@ void MainWindow::OnTabChanged() {
                 SetTaskBusy(TaskMode::Indexing);
             }
         } else {
-            // Index ready — re-apply whatever is in the box.
-            RunSearch();
+            // v2.6: opening the tab must NOT fire a search on its own —
+            // only re-apply when the user already typed something.
+            wchar_t buf[512] = {};
+            GetWindowTextW(h_.editSearch, buf, 512);
+            if (buf[0]) RunSearch();
+            else UpdateSearchStatus();
         }
     }
     if (auto* p = ActivePresenter()) p->Refresh();
@@ -748,7 +818,12 @@ void MainWindow::OnScanDone() {
     // v2.3: after an index build, re-apply the pending search query.
     if (t == TabId::Search) {
         if (VolumeIndex::Instance().IsValid()) {
-            RunSearch();   // REVIEW-UI P1: worker-side re-filter
+            // v2.6: never auto-fire an empty search (it blanked the list
+            // right after the index finished building).
+            wchar_t buf[512] = {};
+            GetWindowTextW(h_.editSearch, buf, 512);
+            if (buf[0]) RunSearch();   // REVIEW-UI P1: worker-side re-filter
+            else UpdateSearchStatus();
         } else {
             UpdateSearchStatus();
         }
@@ -830,7 +905,7 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     for (HWND h : { h_.exec, h_.undo, h_.emptyQ, h_.open,
                     h_.btnSortSize, h_.btnSortTime, h_.list, h_.tree,
                     h_.targetBtn, h_.advancedChk,
-                    h_.editSearch, h_.chkMatchPath }) {
+                    h_.editSearch, h_.chkMatchPath, h_.btnQuickFilter }) {
         if (h) EnableWindow(h, scanning ? FALSE : (busy ? FALSE : TRUE));
     }
     EnableWindow(h_.tab, mode == TaskMode::Indexing ? TRUE : (busy ? FALSE : TRUE));
@@ -1168,15 +1243,15 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.5";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.6";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
         L"\n【使用说明】\n"
         L"· 垃圾清理：扫描后勾选执行，项目移入隔离区；“清空隔离区”才真正释放空间。"
         L"含程序员构建缓存（bin/obj/.vs 等）。\n"
-        L"· 文件搜索：输入即搜全盘（参考 Everything）；过滤词 folder: / file: / ext:cpp;h；"
-        L"双击定位文件；索引缓存加速启动并自动增量更新。\n"
+        L"· 文件搜索：输入即搜全盘（参考 Everything）；“快速筛选”一键列出 .pdb/.obj/Debug 文件夹"
+        L"等；双击定位文件；索引缓存加速启动并自动增量更新。\n"
         L"· 大文件/去重：按大小、类型、磁盘过滤；重复文件保留最新一份，预选其余副本。\n"
         L"· 应用迁移：先选目标盘再执行；原位置以 Junction 保持路径可用，历史页可撤销。\n"
         L"· 文件夹分析：右键顶层文件夹可移入隔离区。\n"

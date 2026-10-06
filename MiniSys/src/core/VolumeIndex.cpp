@@ -93,6 +93,7 @@ void VolumeIndex::ResetForTesting() {
     valid_.store(false, std::memory_order_release);
     entryCount_.store(0, std::memory_order_release);
     ready_ = false;
+    walkBuilt_ = false;
     drive_ = 0;
     volumeSerial_ = 0;
     journalId_ = 0;
@@ -367,8 +368,18 @@ bool VolumeIndex::BuildFull(wchar_t drive,
                             L"%zu) — the V1 path is broken on this machine",
                             nodes_.size(), v1Count);
             }
-            // If V0 is also tiny the volume may genuinely be small — keep it.
         }
+    }
+
+    // v2.6: both USN shapes still look truncated → the MFT stream is broken
+    // on this machine. Fall back to a filesystem walk so search has REAL
+    // data instead of a confident 262-entry index.
+    if (ok && !cancel.load() && nodes_.size() < 10000) {
+        MS_LOG_WARN(L"VolumeIndex: USN enumeration truncated after both request "
+                    L"shapes (%zu records) — falling back to a filesystem walk",
+                    nodes_.size());
+        if (progress) progress(L"USN 枚举异常，回退为文件系统遍历（较慢）…");
+        ok = WalkBuild(drive, progress, cancel);
     }
 
     if (vol != INVALID_HANDLE_VALUE) CloseHandle(vol);
@@ -389,7 +400,86 @@ bool VolumeIndex::BuildFull(wchar_t drive,
     return valid_;
 }
 
+// v2.6: filesystem-walk fallback (see header). Synthetic FRNs are unique
+// within the session; the journal machinery is intentionally disabled.
+bool VolumeIndex::WalkBuild(wchar_t drive,
+                            const std::function<void(const std::wstring&)>& progress,
+                            const std::atomic<bool>& cancel) {
+    nodes_.clear();
+    names_.clear();
+    walkBuilt_ = false;
+    journalId_ = 0;
+    nextUsn_ = 0;
+
+    uint64_t nextFrn = 1;
+    Node root{};
+    root.frn = nextFrn;
+    root.parentFrn = nextFrn;   // self-parent → Finalize treats it as root
+    root.isDir = true;
+    nodes_.push_back(root);
+    uint64_t rootFrn = nextFrn++;
+
+    struct Frame { std::wstring path; uint64_t parentFrn; };
+    std::vector<Frame> stack{ { RootPath(drive), rootFrn } };
+
+    std::vector<WIN32_FIND_DATAW> entries;
+    size_t reported = 0;
+    while (!stack.empty()) {
+        if (cancel.load()) return false;
+        Frame fr = stack.back();
+        stack.pop_back();
+
+        entries.clear();
+        std::wstring search = fr.path;
+        if (!search.empty() && search.back() != L'\\') search += L'\\';
+        search += L'*';
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileExW(
+            LongPath(std::filesystem::path(search)).c_str(),
+            FindExInfoBasic, &fd,
+            FindExSearchNameMatch, nullptr,
+            FIND_FIRST_EX_LARGE_FETCH);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            const wchar_t* n = fd.cFileName;
+            if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+
+            Node node{};
+            node.frn       = nextFrn++;
+            node.parentFrn = fr.parentFrn;
+            node.attrs     = fd.dwFileAttributes;
+            node.lastWrite = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                             static_cast<uint64_t>(fd.ftLastWriteTime.dwLowDateTime);
+            node.isDir     = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            node.nameOff   = static_cast<uint32_t>(names_.size());
+            node.nameLen   = static_cast<uint32_t>(wcslen(n));
+            names_ += n;
+            uint64_t frn = node.frn;
+            bool isDir = node.isDir;
+            nodes_.push_back(std::move(node));
+
+            if (isDir) {
+                stack.push_back({ fr.path + L"\\" + n, frn });
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+
+        if (reported + 100000 <= nodes_.size()) {
+            reported = nodes_.size();
+            if (progress) {
+                progress(L"遍历: " + std::to_wstring(nodes_.size()) + L" 项");
+            }
+        }
+    }
+    walkBuilt_ = !nodes_.empty();
+    MS_LOG_INFO(L"VolumeIndex: walk fallback built %zu entries on %c:",
+                nodes_.size(), drive);
+    return walkBuilt_;
+}
+
 bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
+    if (walkBuilt_) return true;   // no journal for walk-built indexes
     if (!valid_ || nextUsn_ == 0) return false;
 
     HANDLE vol = CreateFileW(VolumeHandlePath(drive_).c_str(), GENERIC_READ,
@@ -702,6 +792,28 @@ VolumeIndex::SearchFilter VolumeIndex::ParseFilterTerms(const std::wstring& quer
     return f;
 }
 
+std::wstring VolumeIndex::ToggleQueryToken(const std::wstring& current,
+                                           const std::wstring& newToken) {
+    auto colon = newToken.find(L':');
+    std::wstring prefix = (colon == std::wstring::npos)
+        ? ToLower(newToken)
+        : ToLower(newToken.substr(0, colon + 1));   // e.g. "ext:"
+    std::wstring out;
+    for (const auto& tok : SplitQuery(current)) {
+        if (!prefix.empty() &&
+            ToLower(tok).rfind(prefix, 0) == 0) {
+            continue;   // same category — replaced by the new token
+        }
+        if (!out.empty()) out += L' ';
+        out += tok;
+    }
+    if (!newToken.empty()) {
+        if (!out.empty()) out += L' ';
+        out += newToken;
+    }
+    return out;
+}
+
 size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
                            size_t maxResults,
                            const std::function<bool(const SearchHit&)>& sink,
@@ -922,6 +1034,7 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
 
 void VolumeIndex::SaveCacheIfWorthwhile() const {
     if (!valid_.load(std::memory_order_acquire)) return;
+    if (walkBuilt_) return;   // walk-built indexes are session-only
     if (nodes_.size() < kMinCachedEntries) return;   // truncated indexes stay volatile
 
     auto final = CacheFilePath();

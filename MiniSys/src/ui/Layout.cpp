@@ -78,11 +78,18 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
         SetWindowPos(ui.lblSearch,   nullptr, sx, settingsY + 1,
                      Scale(46, dpi), lblH, SWP_NOZORDER);
         sx += Scale(46, dpi) + 4;
+        // v2.6: [搜索框][快速筛选 ▾][匹配完整路径] — the quick-filter
+        // button squeezes in between the edit and the checkbox.
+        int chkW = Scale(146, dpi);
+        int qfW  = Scale(104, dpi);
+        int chkX = W - pad - chkW;
+        int qfX  = chkX - 6 - qfW;
+        SetWindowPos(ui.chkMatchPath, nullptr, chkX, settingsY + 1,
+                     chkW, lblH, SWP_NOZORDER);
+        SetWindowPos(ui.btnQuickFilter, nullptr, qfX, settingsY,
+                     qfW, editH, SWP_NOZORDER);
         SetWindowPos(ui.editSearch,  nullptr, sx, settingsY,
-                     W - sx - pad - Scale(150, dpi), editH, SWP_NOZORDER);
-        SetWindowPos(ui.chkMatchPath, nullptr,
-                     W - pad - Scale(146, dpi), settingsY + 1,
-                     Scale(146, dpi), lblH, SWP_NOZORDER);
+                     qfX - 6 - sx, editH, SWP_NOZORDER);
     }
 
     if (showSettings) {

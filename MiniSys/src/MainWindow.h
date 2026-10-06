@@ -74,6 +74,7 @@ private:
     bool scanIconIsStop_ = false;             // v2.5 (L-22): cancel-state icon
     void OnIdleCheck();                       // v2.5: idle background rescan
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
+    void OnQuickFilterMenu();                 // v2.6: search filter presets
 };
 
 } // namespace minisys

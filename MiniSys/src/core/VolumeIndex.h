@@ -81,6 +81,12 @@ public:
     // re-joined (space separated) into `freeQuery`.
     static SearchFilter ParseFilterTerms(const std::wstring& query,
                                          std::wstring& freeQuery);
+    // Quick-filter helper (v2.6): replaces the token of the same category
+    // (prefix before ':', e.g. "ext:") inside `current`, or appends it.
+    // Free text and other categories are preserved; an empty newToken is a
+    // no-op ("清除全部过滤" strips via ParseFilterTerms instead).
+    static std::wstring ToggleQueryToken(const std::wstring& current,
+                                         const std::wstring& newToken);
     size_t Search(const std::wstring& query, bool matchPath, size_t maxResults,
                   const std::function<bool(const SearchHit&)>& sink,
                   const SearchFilter& filter = {}) const;
@@ -122,6 +128,15 @@ private:
                    const std::function<void(const std::wstring&)>& progress,
                    const std::atomic<bool>& cancel);
 
+    // v2.6: last-resort index source when both USN request shapes come back
+    // truncated (live defect: 27/262/456 records on a multi-million-file
+    // volume). Walks the filesystem and synthesizes the FRN tree — slower
+    // but structurally complete, so search always has real data. Such an
+    // index is session-only (no journal to refresh, never persisted).
+    bool WalkBuild(wchar_t drive,
+                   const std::function<void(const std::wstring&)>& progress,
+                   const std::atomic<bool>& cancel);
+
     // v2.5 disk cache (%LOCALAPPDATA%\MiniSys\index-cache.bin): avoids the
     // ~30 s MFT walk on every start. Accuracy comes from RefreshFromUsn —
     // the journal delta is applied after loading, so a stale cache self-
@@ -143,6 +158,7 @@ private:
     std::atomic<bool> valid_{false};   // volume-backed (UI-readable)
     std::atomic<size_t> entryCount_{0};// nodes_.size() mirror (UI-readable)
     bool ready_ = false;   // lookups built — synthetic test indexes too (worker-only)
+    bool walkBuilt_ = false;   // v2.6: filesystem-walk fallback index (worker-only)
     wchar_t drive_ = 0;
     uint64_t volumeSerial_ = 0;
     uint64_t journalId_ = 0;
