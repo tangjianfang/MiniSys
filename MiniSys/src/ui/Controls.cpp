@@ -92,6 +92,17 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
         WS_CHILD | WS_VISIBLE,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_DRIVES), inst, nullptr);
 
+    // ---- v2.3: instant search row (hidden by default, search tab only) ----
+    h.lblSearch = CreateWindowExW(0, L"STATIC", L"搜索:",
+        WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        0, 0, 0, 0, parent, nullptr, inst, nullptr);
+    h.editSearch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_SEARCH), inst, nullptr);
+    h.chkMatchPath = CreateWindowExW(0, L"BUTTON", L"匹配完整路径",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_MATCHPATH), inst, nullptr);
+
     // ---- Sort buttons (shown for scan result tabs, hidden for History/FolderTree) ----
     h.btnSortSize = CreateWindowExW(0, L"BUTTON", L"按大小排序",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -121,6 +132,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
                       h.lblMinSize, h.editMinSize, h.lblMinSizeUnit,
                       h.lblFileType, h.editFileType,
                       h.lblDrives, h.editDrives,
+                      h.lblSearch, h.editSearch, h.chkMatchPath,
                       h.btnSortSize, h.btnSortTime, h.tree, h.about }) {
         SendMessageW(ctl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }

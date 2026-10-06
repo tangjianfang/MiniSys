@@ -77,9 +77,11 @@ protected:
 
 private:
     void ApplySortAndRefresh();
-    void RenderItems();
     void ShowItemInfo(const ScanItem& it);   // REVIEW P1-6
     static std::wstring RiskBadge(const ScanItem& it);
+
+protected:
+    void RenderItems();   // protected: SearchPresenter re-renders on query
 };
 
 class JunkPresenter : public ListTabPresenter {
@@ -98,6 +100,26 @@ class AppsPresenter : public ListTabPresenter {
 public:
     using ListTabPresenter::ListTabPresenter;
     std::unique_ptr<Scanner> BuildScanner() override;
+};
+
+// v2.3: Everything-style instant search over the shared VolumeIndex.
+// No scanner — the search box drives filtering on the UI thread with a
+// debounce; the scan button rebuilds/refreshes the index instead.
+class SearchPresenter : public ListTabPresenter {
+public:
+    SearchPresenter(TabId tab, UiHandles ui);
+
+    std::unique_ptr<Scanner> BuildScanner() override;   // nullptr
+    void Refresh() override;
+
+    // Called by the main window (debounced edit change / checkbox toggle).
+    void SetQuery(const std::wstring& text, bool matchPath);
+
+    size_t TotalIndexed() const;
+
+private:
+    std::wstring query_;
+    bool matchPath_ = false;
 };
 
 class FolderTreePresenter : public TabPresenter {

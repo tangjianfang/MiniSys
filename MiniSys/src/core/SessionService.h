@@ -40,6 +40,10 @@ public:
     // Returns false when another task is running.
     bool StartScan(TabId tab, std::unique_ptr<Scanner> scanner);
 
+    // v2.3: build/refresh the shared volume index on the worker thread
+    // (powers the instant-search tab). Posts WM_APP_SCAN_* like a scan.
+    bool BuildIndexAsync();
+
     // ---- execution -------------------------------------------------------
     struct ExecuteReport {
         int succeeded = 0;

@@ -36,6 +36,10 @@
 
 // Accelerators (keyboard navigation, REVIEW P2)
 #define IDC_ACCEL_SELECTALL         2090  // Ctrl+A — toggle all rows
+// v2.3: instant search tab
+#define IDC_EDIT_SEARCH             2022
+#define IDC_CHK_MATCHPATH           2023
+#define TIMER_SEARCH_DEBOUNCE       2
 // Context menu on the list (REVIEW P2)
 #define IDM_LIST_OPEN               3002
 #define IDM_LIST_INFO               3003

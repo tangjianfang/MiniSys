@@ -12,7 +12,8 @@ namespace {
 int Scale(int v, UINT dpi) { return v * static_cast<int>(dpi) / 96; }
 }
 
-void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
+void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
+                  bool showSearch) {
     UINT dpi = 96;
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
         using Fn = UINT(WINAPI*)(HWND);
@@ -46,10 +47,24 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
     SetWindowPos(ui.btnSortSize, nullptr, pad + 4*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
     SetWindowPos(ui.btnSortTime, nullptr, pad + 5*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
 
-    // LargeFiles settings row — only rendered when LargeFiles tab is active.
+    // Settings/search row — rendered when LargeFiles or Search tab is
+    // active (v2.3: the search box lives on the same row mechanism).
     const int editH = Scale(24, dpi);
     const int lblH  = Scale(22, dpi);
-    int settingsRowH = showSettings ? (editH + pad) : 0;
+    int settingsRowH = (showSettings || showSearch) ? (editH + pad) : 0;
+    int settingsY = btnY + btnH + pad;
+
+    if (showSearch) {
+        int sx = pad;
+        SetWindowPos(ui.lblSearch,   nullptr, sx, settingsY + 1,
+                     Scale(46, dpi), lblH, SWP_NOZORDER);
+        sx += Scale(46, dpi) + 4;
+        SetWindowPos(ui.editSearch,  nullptr, sx, settingsY,
+                     W - sx - pad - Scale(150, dpi), editH, SWP_NOZORDER);
+        SetWindowPos(ui.chkMatchPath, nullptr,
+                     W - pad - Scale(146, dpi), settingsY + 1,
+                     Scale(146, dpi), lblH, SWP_NOZORDER);
+    }
 
     if (showSettings) {
         const int editW   = Scale(70, dpi);
@@ -58,7 +73,6 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
         const int lblW1   = Scale(76, dpi);
         const int lblW2   = Scale(150, dpi);
         const int lblW3   = Scale(190, dpi);
-        int settingsY = btnY + btnH + pad;
         int sx = pad;
         SetWindowPos(ui.lblMinSize,     nullptr, sx,                  settingsY+1, lblW1, lblH, SWP_NOZORDER);
         SetWindowPos(ui.editMinSize,    nullptr, sx+lblW1+4,          settingsY,   editW, editH, SWP_NOZORDER);

@@ -55,6 +55,21 @@ public:
     bool CollectChildren(const std::wstring& dirPath,
                          const std::function<void(const FileEntry&)>& cb) const;
 
+    // ---- Everything-style instant search (v2.3) ----------------------------
+    // Query syntax: whitespace-separated terms, ALL must match (AND);
+    // case-insensitive; '*'/'?' wildcards per term; when `matchPath` is set
+    // a term may match anywhere in the full path instead of just the name.
+    // Emits up to maxResults hits in name-ascending order; `sink` returning
+    // false stops early. Returns the number of hits emitted.
+    struct SearchHit {
+        std::wstring name;      // original-case file name
+        std::wstring path;      // original-case full path
+        uint64_t     lastWrite = 0;
+        bool         isDirectory = false;
+    };
+    size_t Search(const std::wstring& query, bool matchPath, size_t maxResults,
+                  const std::function<bool(const SearchHit&)>& sink) const;
+
     // ---- test seams (unit tests build synthetic indexes) ----
     void ResetForTesting();
     void AddNodeForTesting(uint64_t frn, uint64_t parentFrn,
@@ -116,6 +131,12 @@ private:
     std::unordered_map<uint64_t, std::vector<uint32_t>> childrenOf_;   // parent FRN -> child idxs
     std::unordered_map<std::wstring, uint32_t> dirPaths_;   // lowercased dir path -> node idx
     std::unordered_map<std::wstring, uint32_t> filePaths_;  // lowercased file path -> node idx
+    // FRN -> lowercased dir path (pointer into dirPaths_ keys, stable) for
+    // fast full-path matching during Search without per-node climbing.
+    std::unordered_map<uint64_t, const std::wstring*> frnToDirPath_;
+
+    // Search internals.
+    std::wstring OriginalCasePathOf(const Node& n) const;
 };
 
 } // namespace minisys

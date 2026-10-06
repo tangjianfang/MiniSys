@@ -52,6 +52,7 @@ private:
     void OnPreviewExecution();                 // dry-run GuardRails (08-F7)
     void OnExcludeSelected();                  // "永不清理此文件夹" (08-F9)
     void OnListContextMenu();                  // list right-click menu
+    void UpdateSearchStatus();                 // v2.3: search result count
 
     TabId CurrentTab() const;
     TabPresenter* ActivePresenter() const;

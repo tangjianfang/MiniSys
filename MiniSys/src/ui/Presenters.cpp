@@ -8,6 +8,7 @@
 #include "core/OperationLog.h"
 #include "core/PlanBuilder.h"
 #include "core/SessionService.h"
+#include "core/VolumeIndex.h"
 #include "res/resource.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
@@ -230,6 +231,81 @@ std::unique_ptr<Scanner> LargeFilesPresenter::BuildScanner() {
 
 std::unique_ptr<Scanner> AppsPresenter::BuildScanner() {
     return std::make_unique<AppScanner>();
+}
+
+// ---- SearchPresenter (v2.3) ----------------------------------------------
+
+SearchPresenter::SearchPresenter(TabId tab, UiHandles ui)
+    : ListTabPresenter(tab, ui) {}
+
+std::unique_ptr<Scanner> SearchPresenter::BuildScanner() {
+    return nullptr;   // the scan button is repurposed to rebuild the index
+}
+
+size_t SearchPresenter::TotalIndexed() const {
+    auto& vi = VolumeIndex::Instance();
+    return vi.IsValid() ? vi.EntryCount() : 0;
+}
+
+void SearchPresenter::SetQuery(const std::wstring& text, bool matchPath) {
+    query_ = text;
+    matchPath_ = matchPath;
+    Refresh();
+}
+
+void SearchPresenter::Refresh() {
+    auto& vi = VolumeIndex::Instance();
+    if (!vi.IsValid()) {
+        snapshot_.clear();
+        SessionService::Instance().MutableResults(tab_) = snapshot_;
+        RenderItems();
+        return;
+    }
+    if (query_.empty()) {
+        snapshot_.clear();
+        SessionService::Instance().MutableResults(tab_) = snapshot_;
+        RenderItems();
+        return;
+    }
+
+    constexpr size_t kMaxResults = 1000;
+    constexpr size_t kSizeFetchRows = 150;   // lazy size pass (top rows)
+    std::vector<ScanItem> items;
+    items.reserve(256);
+    vi.Search(query_, matchPath_, kMaxResults,
+        [&](const VolumeIndex::SearchHit& hit) {
+            ScanItem it;
+            std::filesystem::path p(hit.path);
+            it.category    = hit.isDirectory ? L"文件夹" : L"文件";
+            it.title       = hit.name;
+            it.path        = p;
+            it.sizeBytes   = 0;                      // filled below (top rows)
+            it.lastWriteFiletime = hit.lastWrite;
+            it.createTime  = hit.lastWrite;
+            it.detail      = p.parent_path().wstring();
+            it.recommended = false;
+            it.riskLevel   = RiskLevel::Cautious;    // unclassified — badge "—"
+            items.push_back(std::move(it));
+            return true;
+        });
+
+    // Lazy size fetch for the first rows so 大小 sort/column works without
+    // walking every hit (ADR-004: the index itself carries no sizes).
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    for (size_t i = 0; i < items.size() && i < kSizeFetchRows; ++i) {
+        if (GetFileAttributesExW(LongPath(items[i].path).c_str(),
+                                 GetFileExInfoStandard, &fad)) {
+            items[i].sizeBytes =
+                (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
+                static_cast<unsigned long long>(fad.nFileSizeLow);
+        }
+    }
+
+    // Keep the service-side storage in sync so the plan-staleness check in
+    // ExecutePlan sees exactly what the user confirmed.
+    SessionService::Instance().MutableResults(tab_) = items;
+    snapshot_ = std::move(items);
+    RenderItems();
 }
 
 // =====================================================================

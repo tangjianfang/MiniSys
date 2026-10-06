@@ -27,8 +27,9 @@ TEST(ScanItemTests, RiskLevelOrdering) {
 
 TEST(TabIdTests, FiveTabs) {
     EXPECT_EQ(static_cast<int>(TabId::Junk), 0);
-    EXPECT_EQ(static_cast<int>(TabId::History), 4);
-    EXPECT_EQ(static_cast<int>(TabId::Count), 5);
+    EXPECT_EQ(static_cast<int>(TabId::Search), 1);
+    EXPECT_EQ(static_cast<int>(TabId::History), 5);
+    EXPECT_EQ(static_cast<int>(TabId::Count), 6);
 }
 
 } // namespace

@@ -6,6 +6,7 @@
 #include "core/MoveJunctionOp.h"
 #include "core/OperationLog.h"
 #include "core/QuarantineOp.h"
+#include "core/VolumeIndex.h"
 #include "platform/SystemRestore.h"
 #include "res/resource.h"
 #include "util/Logger.h"
@@ -100,8 +101,29 @@ bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
     });
 }
 
-void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd) {
-    std::vector<ScanItem> buffer;
+bool SessionService::BuildIndexAsync() {
+    if (IsBusy()) return false;
+    SetProgress(L"构建文件索引…");
+    HWND hwnd = hwnd_;
+    bool ok = StartTask(TaskKind::Scanning, [this, hwnd]() {
+        auto& vi = VolumeIndex::Instance();
+        auto sd = SystemDriveRoot();
+        wchar_t drive = (sd.size() >= 2 && sd[1] == L':') ? sd[0] : L'C';
+        vi.EnsureBuilt(drive,
+            [this, hwnd](const std::wstring& msg) {
+                SetProgress(L"索引: " + msg);
+                Post(hwnd, WM_APP_SCAN_PROGRESS);
+            },
+            cancelScan_);
+        SetProgress(vi.IsValid()
+            ? FormatW(L"索引就绪: %zu 项", vi.EntryCount())
+            : L"索引不可用（此磁盘不支持或被策略限制），垃圾扫描仍可用（较慢）");
+        Post(hwnd, WM_APP_SCAN_DONE);
+    });
+    return ok;
+}
+
+void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd) {    std::vector<ScanItem> buffer;
     auto t0 = std::chrono::steady_clock::now();
     try {
         scanner->Scan(buffer,

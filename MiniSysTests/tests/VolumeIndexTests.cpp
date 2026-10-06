@@ -91,6 +91,63 @@ TEST_F(VolumeIndexTest, SyntheticIndexIsNotVolumeValid) {
     EXPECT_FALSE(VolumeIndex::Instance().IsValid());
 }
 
+TEST_F(VolumeIndexTest, EverythingStyleSearch) {
+    auto& idx = VolumeIndex::Instance();
+    // Tree from the fixture:
+    //   C:\Users\tjf\file.txt   C:\Temp\a.tmp
+    struct Hit { std::wstring path; bool isDir; };
+    auto collect = [&](const wchar_t* q, bool matchPath) {
+        std::vector<Hit> hits;
+        idx.Search(q, matchPath, 100, [&](const VolumeIndex::SearchHit& h) {
+            hits.push_back({ h.path, h.isDirectory });
+            return true;
+        });
+        return hits;
+    };
+
+    // Substring, case-insensitive.
+    auto r = collect(L"FILE", false);
+    ASSERT_EQ(r.size(), 1u);
+    EXPECT_EQ(r[0].path, L"C:\\Users\\tjf\\file.txt");
+    EXPECT_FALSE(r[0].isDir);
+
+    // Multi-term AND.
+    EXPECT_EQ(collect(L"file txt", false).size(), 1u);
+    EXPECT_EQ(collect(L"file nomatch", false).size(), 0u);
+
+    // Wildcard.
+    EXPECT_EQ(collect(L"*.tmp", false).size(), 1u);
+    EXPECT_EQ(collect(L"a.???", false).size(), 1u);
+    EXPECT_EQ(collect(L"*.mp9", false).size(), 0u);
+
+    // matchPath: a term that only occurs in a folder name widens the hits.
+    // Fixture: C:\Users\tjf\file.txt and C:\Temp\a.tmp.
+    EXPECT_EQ(collect(L"tjf", false).size(), 1u);   // the tjf dir itself
+    EXPECT_EQ(collect(L"tjf", true).size(), 2u);    // + file.txt under Users\tjf
+    EXPECT_EQ(collect(L"temp", false).size(), 1u);  // the Temp dir itself
+    EXPECT_EQ(collect(L"temp", true).size(), 2u);   // + a.tmp under C:\Temp
+    // Separator integrity: "tjf\" + "file" must match, "tjffile" must not.
+    EXPECT_EQ(collect(L"f\\file", true).size(), 1u);   // ...\tjf\file.txt
+    EXPECT_EQ(collect(L"tjffile", true).size(), 0u);   // no run-on
+
+    // Directory hits carry isDir.
+    auto rd = collect(L"use*", true);              // "Users" dir (wildcard, name)
+    ASSERT_EQ(rd.size(), 1u);
+    EXPECT_TRUE(rd[0].isDir);
+
+    // Empty query emits nothing.
+    size_t emitted = idx.Search(L"", false, 0, [](const VolumeIndex::SearchHit&) {
+        return true;
+    });
+    EXPECT_EQ(emitted, 0u);
+
+    // Sorted by name ascending: a.tmp, file.txt, Temp, tjf, Users (case-folded).
+    auto rs = collect(L"*", false);
+    ASSERT_EQ(rs.size(), 5u);                      // all non-root nodes
+    EXPECT_NE(rs[0].path.find(L"a.tmp"), std::wstring::npos);
+    EXPECT_NE(rs[1].path.find(L"file.txt"), std::wstring::npos);
+}
+
 TEST(VolumeIndexIntegration, RealBuildRequiresAdmin) {
     // FSCTL_ENUM_USN_DATA needs an elevated process. Non-elevated test runs
     // must gracefully fail (the FastWalk fallback path in JunkScanner).

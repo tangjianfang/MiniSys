@@ -6,10 +6,11 @@ namespace minisys {
 // presenters share one definition (MainWindow no longer owns it).
 enum class TabId : int {
     Junk = 0,
-    LargeFiles = 1,
-    Apps = 2,
-    FolderTree = 3,
-    History = 4,
+    Search = 1,        // v2.3: Everything-style instant file search
+    LargeFiles = 2,
+    Apps = 3,
+    FolderTree = 4,
+    History = 5,
     Count
 };
 

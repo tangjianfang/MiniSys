@@ -1,7 +1,9 @@
 #include "core/VolumeIndex.h"
 
 #include "util/Logger.h"
+#include "core/JunkRules.h"
 #include "util/StringUtils.h"
+#include <string_view>
 
 #include <windows.h>
 #include <winioctl.h>
@@ -123,6 +125,7 @@ void VolumeIndex::Finalize() {
     byFrn_.clear();
     childrenOf_.clear();
     dirPaths_.clear();
+    frnToDirPath_.clear();
     byFrn_.reserve(nodes_.size() * 2);
     childrenOf_.reserve(nodes_.size());
     for (uint32_t i = 0; i < nodes_.size(); ++i) {
@@ -142,6 +145,10 @@ void VolumeIndex::Finalize() {
         if (n.frn == 0) continue;           // tombstoned
         if (n.isDir && n.parentFrn == n.frn) {
             dirPaths_[rootLower] = static_cast<uint32_t>(&n - nodes_.data());
+            auto rootIns = dirPaths_.find(rootLower);
+            if (rootIns != dirPaths_.end()) {
+                frnToDirPath_[n.frn] = &(rootIns->first);   // v2.3: search
+            }
             // Walk children.
             std::vector<std::pair<uint32_t, std::wstring>> stack;
             auto it = childrenOf_.find(n.frn);
@@ -160,7 +167,10 @@ void VolumeIndex::Finalize() {
                 }
                 path += NodeName(cn, names_);
                 if (cn.isDir) {
-                    dirPaths_[ToLower(path)] = idx;   // map keys are lowercase
+                    auto ins = dirPaths_.emplace(ToLower(path), idx);   // lowercase keys
+                    if (ins.second) {
+                        frnToDirPath_[cn.frn] = &(ins.first->first);    // v2.3: search
+                    }
                     auto cit = childrenOf_.find(cn.frn);
                     if (cit != childrenOf_.end()) {
                         for (uint32_t cci : cit->second) {
@@ -520,9 +530,164 @@ bool VolumeIndex::CollectSubtree(const std::wstring& dirPath,
     return true;
 }
 
+// ---- v2.3: Everything-style instant search --------------------------------
+
+namespace {
+
+// Case-insensitive substring search over wchar views, allocation-free for
+// the ASCII fast path (the overwhelmingly common case). Falls back to a
+// lowered copy for non-ASCII needles.
+inline wchar_t FoldCh(wchar_t c) {
+    return (c >= L'A' && c <= L'Z') ? c + 32 : c;
+}
+bool IFindView(std::wstring_view hay, std::wstring_view needle) {
+    bool asciiNeedle = true;
+    for (wchar_t c : needle) {
+        if (c > 0x7F) { asciiNeedle = false; break; }
+    }
+    if (asciiNeedle) {
+        if (needle.empty()) return true;
+        if (hay.size() < needle.size()) return false;
+        for (size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+            size_t j = 0;
+            for (; j < needle.size(); ++j) {
+                if (FoldCh(hay[i + j]) != FoldCh(needle[j])) break;
+            }
+            if (j == needle.size()) return true;
+        }
+        return false;
+    }
+    std::wstring h(hay);
+    std::wstring n(needle);
+    return ToLower(h).find(ToLower(n)) != std::wstring::npos;
+}
+
+bool HasWildcard(std::wstring_view s) {
+    return s.find(L'*') != std::wstring_view::npos ||
+           s.find(L'?') != std::wstring_view::npos;
+}
+
+std::vector<std::wstring> SplitQuery(const std::wstring& q) {
+    std::vector<std::wstring> out;
+    std::wstring cur;
+    for (wchar_t c : q) {
+        if (c == L' ' || c == L'\t' || c == L'\u3000') {
+            if (!cur.empty()) { out.push_back(std::move(cur)); cur.clear(); }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    return out;
+}
+
+} // namespace
+
+std::wstring VolumeIndex::OriginalCasePathOf(const Node& n) const {
+    // Climb parent links, prepending original-case names. Stops at the root
+    // (self-parented) or when an ancestor is missing (deleted mid-session).
+    std::vector<std::wstring_view> parts;
+    const Node* cur = &n;
+    int guard = 0;
+    while (cur && cur->frn != 0 && guard++ < 128) {
+        parts.push_back(std::wstring_view(names_.data() + cur->nameOff,
+                                          cur->nameLen));
+        if (cur->parentFrn == cur->frn) break;   // root
+        auto it = byFrn_.find(cur->parentFrn);
+        if (it == byFrn_.end()) return {};       // broken chain — skip hit
+        cur = &nodes_[it->second];
+    }
+    std::wstring path = RootPath(drive_);        // "C:\"
+    for (auto rit = parts.rbegin(); rit != parts.rend(); ++rit) {
+        if (!(path.back() == L'\\' || path.back() == L'/')) path += L'\\';
+        path.append(*rit);
+    }
+    return path;
+}
+
+size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
+                           size_t maxResults,
+                           const std::function<bool(const SearchHit&)>& sink) const {
+    if (!ready_) return 0;
+    auto terms = SplitQuery(query);
+    if (terms.empty() || maxResults == 0) return 0;
+
+    // Pass 1: collect matching nodes (name-first matching avoids path
+    // construction for the common case; a term that fails on the name is
+    // retried against the full lowercased path only when matchPath is on).
+    struct RawHit { uint32_t nodeIdx; std::wstring name; };
+    std::vector<RawHit> hits;
+    hits.reserve(maxResults < 4096 ? maxResults : 4096);
+
+    for (uint32_t i = 0; i < nodes_.size() && hits.size() < maxResults; ++i) {
+        const Node& n = nodes_[i];
+        if (n.frn == 0 || n.parentFrn == n.frn) continue;   // tombstone/root
+        std::wstring_view name(names_.data() + n.nameOff, n.nameLen);
+
+        std::wstring lowerPath;                    // built at most once per node
+        bool pathMatched = true;
+        for (const auto& term : terms) {
+            bool ok;
+            if (HasWildcard(term)) {
+                ok = JunkRules::MatchWildcard(term, std::wstring(name));
+                if (!ok && matchPath) {
+                    if (lowerPath.empty()) {
+                        auto pit = frnToDirPath_.find(n.parentFrn);
+                        if (pit == frnToDirPath_.end()) { pathMatched = false; break; }
+                        const std::wstring& parent = *pit->second;
+                        lowerPath = parent;
+                        if (!lowerPath.empty() && lowerPath.back() != L'\\') {
+                            lowerPath += L'\\';   // dir keys carry no trailing sep (root does)
+                        }
+                        lowerPath += name;
+                    }
+                    ok = JunkRules::MatchWildcard(term, lowerPath);
+                }
+            } else {
+                ok = IFindView(name, term);
+                if (!ok && matchPath) {
+                    if (lowerPath.empty()) {
+                        auto pit = frnToDirPath_.find(n.parentFrn);
+                        if (pit == frnToDirPath_.end()) { pathMatched = false; break; }
+                        const std::wstring& parent = *pit->second;
+                        lowerPath = parent;
+                        if (!lowerPath.empty() && lowerPath.back() != L'\\') {
+                            lowerPath += L'\\';   // dir keys carry no trailing sep (root does)
+                        }
+                        lowerPath += name;
+                    }
+                    ok = IFindView(lowerPath, term);
+                }
+            }
+            if (!ok) { pathMatched = false; break; }
+        }
+        if (!pathMatched) continue;
+        hits.push_back({ i, std::wstring(name) });
+    }
+
+    // Pass 2: name-ascending (case-insensitive) like Everything's default,
+    // then emit with lazily-built original-case paths.
+    std::sort(hits.begin(), hits.end(), [](const RawHit& a, const RawHit& b) {
+        return ToLower(a.name) < ToLower(b.name);
+    });
+    size_t emitted = 0;
+    for (const auto& h : hits) {
+        const Node& n = nodes_[h.nodeIdx];
+        std::wstring path = OriginalCasePathOf(n);
+        if (path.empty()) continue;
+        SearchHit hit;
+        hit.name = h.name;
+        hit.path = std::move(path);
+        hit.lastWrite = n.lastWrite;
+        hit.isDirectory = n.isDir;
+        ++emitted;
+        if (!sink(hit) || emitted >= maxResults) break;
+    }
+    return emitted;
+}
+
 bool VolumeIndex::CollectChildren(const std::wstring& dirPath,
-                                  const std::function<void(const FileEntry&)>& cb) const {
-    const Node* dir = FindByPath(dirPath, true);
+                                  const std::function<void(const FileEntry&)>& cb) const {    const Node* dir = FindByPath(dirPath, true);
     if (!dir) return false;
     auto it = childrenOf_.find(dir->frn);
     if (it == childrenOf_.end()) return true;   // empty dir is still valid

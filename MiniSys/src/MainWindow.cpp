@@ -39,12 +39,25 @@ constexpr wchar_t kWindowTitle[] = L"MiniSys — C 盘瘦身助手";
 const wchar_t* TabName(TabId t) {
     switch (t) {
         case TabId::Junk:       return L"垃圾清理";
+        case TabId::Search:     return L"文件搜索";
         case TabId::LargeFiles: return L"大文件 / 去重";
         case TabId::Apps:       return L"应用迁移";
         case TabId::FolderTree: return L"文件夹分析";
         case TabId::History:    return L"操作历史";
         default:                return L"";
     }
+}
+
+// v2.3: thousands-separator count formatting ("1,234,567").
+std::wstring FormatCount(size_t n) {
+    std::wstring raw = std::to_wstring(n);
+    std::wstring out;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        size_t fromEnd = raw.size() - i;
+        out += raw[i];
+        if (fromEnd > 1 && (fromEnd - 1) % 3 == 0) out += L',';
+    }
+    return out;
 }
 
 } // namespace
@@ -145,7 +158,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                        nm->code == LVN_ITEMACTIVATE) {
                 // REVIEW P1-6: double-click = "why is this here" panel.
                 auto* nmia = reinterpret_cast<LPNMITEMACTIVATE>(lp);
-                if (auto* p = ActivePresenter()) {
+                if (CurrentTab() == TabId::Search) {
+                    OnOpenLocation();   // Everything-style: locate the file
+                } else if (auto* p = ActivePresenter()) {
                     p->OnItemActivated(nmia->iItem);
                 }
             } else if (nm->hwndFrom == h_.list && nm->code == NM_CUSTOMDRAW) {
@@ -218,6 +233,20 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_COMMAND: {
+            // v2.3: instant-search input (debounced) + match-path toggle.
+            if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == IDC_EDIT_SEARCH) {
+                SetTimer(hwnd_, TIMER_SEARCH_DEBOUNCE, 200, nullptr);
+                return 0;
+            }
+            if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == IDC_CHK_MATCHPATH) {
+                if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
+                    wchar_t buf[512] = {};
+                    GetWindowTextW(h_.editSearch, buf, 512);
+                    sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+                    UpdateSearchStatus();
+                }
+                return 0;
+            }
             switch (LOWORD(wp)) {
                 case IDC_BTN_SCAN:    OnScan(); break;
                 case IDC_BTN_EXECUTE: OnExecute(); break;
@@ -289,6 +318,18 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_OP_DONE:
             OnPlanDone();
             return 0;
+        case WM_TIMER:
+            // v2.3: search debounce elapsed — apply the query.
+            if (wp == TIMER_SEARCH_DEBOUNCE) {
+                KillTimer(hwnd_, TIMER_SEARCH_DEBOUNCE);
+                if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
+                    wchar_t buf[512] = {};
+                    GetWindowTextW(h_.editSearch, buf, 512);
+                    sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+                    UpdateSearchStatus();
+                }
+            }
+            return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd_);
             return 0;
@@ -312,6 +353,7 @@ void MainWindow::OnCreate() {
     auto& svc = SessionService::Instance();
     svc.SetWindow(hwnd_);
     presenters_[static_cast<size_t>(TabId::Junk)]        = std::make_unique<JunkPresenter>(TabId::Junk, h_);
+    presenters_[static_cast<size_t>(TabId::Search)]     = std::make_unique<SearchPresenter>(TabId::Search, h_);
     presenters_[static_cast<size_t>(TabId::LargeFiles)]  = std::make_unique<LargeFilesPresenter>(TabId::LargeFiles, h_);
     presenters_[static_cast<size_t>(TabId::Apps)]        = std::make_unique<AppsPresenter>(TabId::Apps, h_);
     presenters_[static_cast<size_t>(TabId::FolderTree)]  = std::make_unique<FolderTreePresenter>(h_, svc);
@@ -337,7 +379,8 @@ void MainWindow::OnCreate() {
 void MainWindow::OnSize() {
     RECT rc; GetClientRect(hwnd_, &rc);
     LayoutWindow(h_, rc.right, rc.bottom,
-                 CurrentTab() == TabId::LargeFiles);
+                 CurrentTab() == TabId::LargeFiles,
+                 CurrentTab() == TabId::Search);
 }
 
 TabId MainWindow::CurrentTab() const {
@@ -358,6 +401,7 @@ void MainWindow::OnTabChanged() {
     bool isFolderTree = (t == TabId::FolderTree);
     bool isApps       = (t == TabId::Apps);
     bool isLargeFiles = (t == TabId::LargeFiles);
+    bool isSearch     = (t == TabId::Search);
     bool isScanTab    = !isHistory && !isFolderTree;
 
     // Main action buttons
@@ -371,7 +415,10 @@ void MainWindow::OnTabChanged() {
     ShowWindow(h_.targetBtn,   isApps ? SW_SHOW : SW_HIDE);
     ShowWindow(h_.advancedChk, isApps ? SW_SHOW : SW_HIDE);
 
-    // LargeFiles settings panel
+    // Search row (v2.3) / LargeFiles settings panel
+    for (HWND h : { h_.lblSearch, h_.editSearch, h_.chkMatchPath }) {
+        ShowWindow(h, isSearch ? SW_SHOW : SW_HIDE);
+    }
     for (HWND h : { h_.lblMinSize, h_.editMinSize, h_.lblMinSizeUnit,
                     h_.lblFileType, h_.editFileType, h_.lblDrives, h_.editDrives }) {
         ShowWindow(h, isLargeFiles ? SW_SHOW : SW_HIDE);
@@ -393,6 +440,22 @@ void MainWindow::OnTabChanged() {
             SetWindowTextW(h_.info,
                 L"扫描系统/浏览器/开发缓存等可清理项；勾选后执行将移入隔离区，可在“操作历史”一键还原。\n"
                 L"⚠ 危险项（清空回收站、WinSxS 等）默认不勾选；“清空隔离区”后才真正释放空间。");
+            break;
+        case TabId::Search:
+            SetWindowTextW(h_.info,
+                L"输入即搜（多词为“并且”，支持 * ? 通配符）；双击定位文件，勾选后可移入隔离区。\n"
+                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建。");
+            // v2.3: auto-build the index on first visit.
+            if (!VolumeIndex::Instance().IsValid() &&
+                !SessionService::Instance().IsBusy()) {
+                if (SessionService::Instance().BuildIndexAsync()) {
+                    SetTaskBusy(TaskMode::Scanning);
+                }
+            } else if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
+                wchar_t buf[512] = {};
+                GetWindowTextW(h_.editSearch, buf, 512);
+                sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+            }
             break;
         case TabId::LargeFiles:
             SetWindowTextW(h_.info,
@@ -469,11 +532,39 @@ void MainWindow::OnScan() {
         return;
     }
     auto scanner = ActivePresenter() ? ActivePresenter()->BuildScanner() : nullptr;
-    if (!scanner) return;
+    if (!scanner) {
+        // v2.3: on the search tab the scan button rebuilds the index.
+        if (CurrentTab() == TabId::Search && svc.BuildIndexAsync()) {
+            SetTaskBusy(TaskMode::Scanning);
+        }
+        return;
+    }
     if (!svc.StartScan(CurrentTab(), std::move(scanner))) return;
 
     SetTaskBusy(TaskMode::Scanning);
     UpdateStatusBar();
+}
+
+// v2.3: result-count line for the search tab.
+void MainWindow::UpdateSearchStatus() {
+    auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter());
+    if (!sp) return;
+    auto& vi = VolumeIndex::Instance();
+    if (!vi.IsValid()) {
+        ShowHint(L"ℹ 文件索引构建中/不可用——完成后即可搜索（垃圾扫描也可用，较慢）。");
+        return;
+    }
+    size_t shown = sp->Snapshot().size();
+    wchar_t buf[512] = {};
+    GetWindowTextW(h_.editSearch, buf, 512);
+    if (buf[0] == L'\0') {
+        ShowHint(FormatW(L"索引就绪：%s 项。输入关键词即可开始搜索。",
+                         FormatCount(sp->TotalIndexed()).c_str()));
+    } else {
+        ShowHint(FormatW(L"匹配 %s 项（索引共 %s 项，最多显示前 1,000）。",
+                         FormatCount(shown).c_str(),
+                         FormatCount(sp->TotalIndexed()).c_str()));
+    }
 }
 
 void MainWindow::OnScanDone() {
@@ -482,6 +573,17 @@ void MainWindow::OnScanDone() {
 
     auto t = CurrentTab();
     if (auto* p = ActivePresenter()) p->OnScanDone();
+    // v2.3: after an index build, re-apply the pending search query.
+    if (t == TabId::Search) {
+        if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
+            wchar_t buf[512] = {};
+            GetWindowTextW(h_.editSearch, buf, 512);
+            sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+        }
+        UpdateSearchStatus();
+        UpdateStatusBar();
+        return;
+    }
     if (t != TabId::History && svc.Results(t).empty()) {
         SetWindowTextW(h_.info, L"✓ 未发现可处理项，系统状况良好。");
     }
