@@ -437,7 +437,9 @@ bool SessionService::IdleMaintenanceAsync() {
             }
             if (dead.empty()) continue;
             // Prune the service-side list (the presenter's VERIFY_DONE
-            // application covers the visible copy).
+            // application covers the visible copy) AND persist it — v2.11
+            // fix: ghosts used to resurface from the disk cache after a
+            // restart until the next full scan overwrote the file.
             std::vector<ScanItem> kept;
             kept.reserve(items.size());
             size_t removed = 0;
@@ -450,7 +452,8 @@ bool SessionService::IdleMaintenanceAsync() {
                     ++removed;
                 }
             }
-            StoreResults(tab, std::move(kept));
+            StoreResults(tab, kept);   // copy in (SaveResultsCache reads results_)
+            SaveResultsCache(tab);     // persist the pruned list
             {
                 std::lock_guard<std::mutex> g(verifyMu_);
                 lastDead_ = std::move(dead);
@@ -939,6 +942,26 @@ bool SessionService::VerifyPathsAsync(TabId tab, std::vector<std::wstring> paths
             if (attrs == INVALID_FILE_ATTRIBUTES) dead.push_back(ToLower(p));
         }
         size_t deadCount = dead.size();
+        // v2.11: prune + persist worker-side — the disk cache must not be
+        // able to resurrect the ghosts after a restart (the UI-side
+        // ApplyDeadPaths still refreshes the visible snapshot; its
+        // StoreResults is idempotent with this one).
+        if (!dead.empty()) {
+            auto items = Results(tab);
+            std::vector<ScanItem> kept;
+            kept.reserve(items.size());
+            for (auto& it : items) {
+                if (it.path == L"$RECYCLE.BIN" ||
+                    std::find(dead.begin(), dead.end(),
+                              ToLower(it.path.wstring())) == dead.end()) {
+                    kept.push_back(std::move(it));
+                }
+            }
+            if (kept.size() != items.size()) {
+                StoreResults(tab, kept);
+                SaveResultsCache(tab);
+            }
+        }
         {
             std::lock_guard<std::mutex> g(verifyMu_);
             lastDead_ = std::move(dead);
