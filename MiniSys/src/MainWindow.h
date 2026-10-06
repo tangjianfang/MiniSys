@@ -72,12 +72,15 @@ private:
     std::wstring tabInfoText_;                // REVIEW-UI P1 (L-3): static per-tab description
     bool progDeterminate_ = false;            // v2.5 (L-13): bar mode flag
     bool scanIconIsStop_ = false;             // v2.5 (L-22): cancel-state icon
+    int  idleCountdown_ = 0;                  // v2.10 (X-10): rescan grace
+    DWORD idleArmInput_ = 0;                  // v2.10 (X-10): cancel on input
     void OnIdleCheck();                       // v2.5: idle background rescan
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
     void OnQuickFilterMenu();                 // v2.6: search filter presets
     void OnVerifyList(bool manual);           // v2.7: drop hand-deleted rows
     void OnVerifyDone();                      // v2.8: worker verify results
     void OnPreviewDone();                     // v2.8: worker preview report
+    void OnCommandPalette();                  // v2.10: Ctrl+K command palette
 };
 
 } // namespace minisys

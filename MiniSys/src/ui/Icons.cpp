@@ -25,8 +25,11 @@ bool SetStockButtonIcon(HWND button, int stockIconId) {
     if (cx < 16 || cy < 16) { cx = 16; cy = 16; }
     HICON icon = static_cast<HICON>(CopyImage(sii.hIcon, IMAGE_ICON, cx, cy,
                                               LR_COPYDELETEORG));
-    if (!icon) icon = sii.hIcon;   // fall back to the unscaled original
-    else       DestroyIcon(sii.hIcon);
+    // review-04 R-3: LR_COPYDELETEORG already destroyed the source on
+    // success — destroying it again here was a double free (harmless by
+    // luck, wrong by contract). On failure the source stays alive as the
+    // fallback.
+    if (!icon) icon = sii.hIcon;
 
     HIMAGELIST himl = ImageList_Create(cx, cy, ILC_COLOR32, 1, 1);
     if (!himl) {

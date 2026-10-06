@@ -34,6 +34,8 @@ std::wstring LocalizeCategory(const std::wstring& c);
 void UpdateHeaderSortArrows(HWND list, int col, bool asc);
 // REVIEW-UI P2 (L-11): list cells are single-line — fold "\n" into " · ".
 std::wstring OneLine(const std::wstring& s);
+// review-07 X-9 (v2.10): "MM-dd HH:mm" for the 修改时间 column.
+std::wstring FormatTimeShort(uint64_t filetime);
 } // namespace
 
 // =====================================================================
@@ -44,10 +46,10 @@ ListTabPresenter::ListTabPresenter(TabId tab, UiHandles ui)
     : TabPresenter(tab), ui_(ui) {}
 
 void ListTabPresenter::OnActivate() {
-    // v1 reset the shared sort state on every tab change.
-    sortCol_ = -1;
-    sortAsc_ = false;
-    UpdateHeaderSortArrows(ui_.list, -1, false);
+    // v1 reset the shared sort state on every tab change. review-07 X-7:
+    // sorting is the USER's, not the page's — keep it across switches and
+    // re-show the arrow (the shared header's format resets on tab switch).
+    UpdateHeaderSortArrows(ui_.list, sortCol_, sortAsc_);
 }
 
 void ListTabPresenter::Refresh() {
@@ -56,6 +58,7 @@ void ListTabPresenter::Refresh() {
     // check state BEFORE the snapshot is replaced — explicit unchecking of
     // a recommended item must survive re-renders too.
     CaptureCheckState();
+    CaptureViewState();   // X-7
     snapshot_ = SessionService::Instance().Results(tab_);
     RenderItems();
 }
@@ -74,6 +77,58 @@ void ListTabPresenter::CaptureCheckState() {
     }
 }
 
+// review-07 X-7: same window as CaptureCheckState — the rows still match the
+// snapshot, so paths read here are trustworthy.
+void ListTabPresenter::CaptureViewState() {
+    viewTopPath_.clear();
+    viewFocusPath_.clear();
+    viewSelPaths_.clear();
+    int top = ListView_GetTopIndex(ui_.list);
+    if (const ScanItem* it = ItemAtRow(top)) viewTopPath_ = it->path.wstring();
+    int idx = -1;
+    while ((idx = ListView_GetNextItem(ui_.list, idx, LVNI_SELECTED)) >= 0) {
+        if (const ScanItem* it = ItemAtRow(idx)) {
+            viewSelPaths_.push_back(it->path.wstring());
+        }
+    }
+    if ((idx = ListView_GetNextItem(ui_.list, -1, LVNI_FOCUSED)) >= 0) {
+        if (const ScanItem* it = ItemAtRow(idx)) viewFocusPath_ = it->path.wstring();
+    }
+}
+
+void ListTabPresenter::RestoreViewState() {
+    if (viewTopPath_.empty() && viewFocusPath_.empty() && viewSelPaths_.empty()) {
+        return;
+    }
+    int n = ListView_GetItemCount(ui_.list);
+    int topRow = -1, focusRow = -1;
+    std::vector<int> selRows;
+    for (int r = 0; r < n; ++r) {
+        const ScanItem* it = ItemAtRow(r);
+        if (!it) continue;
+        const std::wstring p = it->path.wstring();
+        if (topRow < 0 && p == viewTopPath_) topRow = r;
+        if (focusRow < 0 && !viewFocusPath_.empty() && p == viewFocusPath_) focusRow = r;
+        for (const auto& s : viewSelPaths_) {
+            if (p == s) { selRows.push_back(r); break; }
+        }
+    }
+    if (!viewSelPaths_.empty() && selRows.empty()) {
+        // Nothing survived — keep at least a focus point.
+        if (topRow < 0 && focusRow < 0 && n > 0) topRow = 0;
+    }
+    for (int r : selRows) {
+        ListView_SetItemState(ui_.list, r, LVIS_SELECTED, LVIS_SELECTED);
+    }
+    if (focusRow >= 0) {
+        ListView_SetItemState(ui_.list, focusRow, LVIS_FOCUSED, LVIS_FOCUSED);
+    } else if (topRow >= 0) {
+        ListView_SetItemState(ui_.list, topRow, LVIS_FOCUSED, LVIS_FOCUSED);
+    }
+    if (topRow >= 0) ListView_EnsureVisible(ui_.list, topRow, FALSE);
+    else if (focusRow >= 0) ListView_EnsureVisible(ui_.list, focusRow, FALSE);
+}
+
 const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
     if (row < 0) return nullptr;
     LVITEMW lvi{}; lvi.iItem = row; lvi.mask = LVIF_PARAM;
@@ -83,13 +138,32 @@ const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
 }
 
 void ListTabPresenter::RenderItems() {
+    // review-07 X-7: user-adjusted column widths survive re-renders when the
+    // column layout is unchanged (a tab switch legitimately resets widths).
+    HWND hdr = ListView_GetHeader(ui_.list);
+    int oldColCount = hdr ? Header_GetItemCount(hdr) : 0;
+    std::vector<int> oldWidths;
+    for (int i = 0; i < oldColCount; ++i) {
+        oldWidths.push_back(ListView_GetColumnWidth(ui_.list, i));
+    }
+
     // REVIEW-UI P0 (L-2): scan tabs get their column headers restored
     // (HistoryPresenter sets its own layout). v2.5: widths are DPI-scaled
-    // (L-12) and the risk column fits "⚠ 系统组件" (L-14).
-    SetListColumns(ui_.list, {
-        { L"分类", 180 }, { L"风险", 110 }, { L"项目", 330 },
-        { L"大小", 100 }, { L"详情", 320 },
-    });
+    // (L-12) and the risk column fits "⚠️ 系统组件" (L-14). review-07 X-9
+    // (v2.10): a real 修改时间 column — "按时间排序" no longer points at the
+    // 详情 column where the timestamp is invisible.
+    const std::vector<std::pair<const wchar_t*, int>> kScanCols = {
+        { L"分类", 150 }, { L"风险", 100 }, { L"项目", 300 },
+        { L"大小", 90 }, { L"详情", 260 }, { L"修改时间", 110 },
+    };
+    SetListColumns(ui_.list, kScanCols);
+    if (oldColCount == static_cast<int>(kScanCols.size())) {
+        for (int i = 0; i < oldColCount; ++i) {
+            if (oldWidths[i] > 0) {
+                ListView_SetColumnWidth(ui_.list, i, oldWidths[i]);
+            }
+        }
+    }
 
     // REVIEW-UI P0 (L-6/04-7): batch renders must not storm
     // LVN_ITEMCHANGED → UpdateExecButton.
@@ -112,6 +186,8 @@ void ListTabPresenter::RenderItems() {
         // REVIEW-UI P2 (L-11): one line per cell (LABELTIP shows the rest).
         std::wstring detail = OneLine(it.detail);
         ListView_SetItemText(ui_.list, row, 4, detail.data());
+        std::wstring tm = FormatTimeShort(it.createTime);
+        ListView_SetItemText(ui_.list, row, 5, tm.data());
         // REVIEW-UI P0 (L-1): full per-path check state — an explicit
         // UNCHECK of a recommended item is preserved as false.
         auto known = checkStateByPath_.find(ToLower(it.path.wstring()));
@@ -120,6 +196,7 @@ void ListTabPresenter::RenderItems() {
         ListView_SetCheckState(ui_.list, row, check ? TRUE : FALSE);
     }
     batchUpdate_ = false;
+    RestoreViewState();   // X-7: top row / focus / selection by path
 }
 
 namespace {
@@ -173,6 +250,26 @@ std::wstring OneLine(const std::wstring& s) {
         }
     }
     return out;
+}
+
+// review-07 X-9: "MM-dd HH:mm" (local time) for the 修改时间 column.
+std::wstring FormatTimeShort(uint64_t filetime) {
+    if (filetime == 0) return L"—";
+    ULARGE_INTEGER ul{};
+    ul.QuadPart = filetime;
+    FILETIME ft{};
+    ft.dwLowDateTime  = ul.LowPart;
+    ft.dwHighDateTime = ul.HighPart;
+    FILETIME localFt{};
+    SYSTEMTIME st{};
+    if (!FileTimeToLocalFileTime(&ft, &localFt) ||
+        !FileTimeToSystemTime(&localFt, &st)) {
+        return L"—";
+    }
+    wchar_t buf[32] = {};
+    swprintf_s(buf, L"%02d-%02d %02d:%02d",
+               st.wMonth, st.wDay, st.wHour, st.wMinute);
+    return buf;
 }
 
 // REVIEW-UI P1 (L-8): display-layer localization for the English category
@@ -242,9 +339,11 @@ std::vector<size_t> ListTabPresenter::CollectChecked() const {
 // v2.8: the existence checks run on the worker (VerifyPathsAsync); this
 // applies the resulting dead-path list to the snapshot, preserving the
 // user's explicit checks and syncing the service results (plan hash).
-size_t ListTabPresenter::ApplyDeadPaths(const std::vector<std::wstring>& deadLower) {
+size_t ListTabPresenter::ApplyDeadPaths(const std::vector<std::wstring>& deadLower,
+                                        bool render) {
     if (deadLower.empty() || snapshot_.empty()) return 0;
     CaptureCheckState();   // keep the user's explicit checks across the prune
+    CaptureViewState();    // X-7
 
     std::vector<ScanItem> kept;
     kept.reserve(snapshot_.size());
@@ -263,7 +362,7 @@ size_t ListTabPresenter::ApplyDeadPaths(const std::vector<std::wstring>& deadLow
 
     snapshot_.swap(kept);
     SessionService::Instance().StoreResults(tab_, snapshot_);
-    RenderItems();
+    if (render) RenderItems();   // review-04 R-1: only the active tab renders
     return removed;
 }
 
@@ -275,16 +374,15 @@ void ListTabPresenter::SortBySize() {
 }
 
 void ListTabPresenter::SortByTime() {
-    // Column 4 = 详情 column, sorted by the item's time (the timestamp is
-    // shown in the tooltip / 说明 panel).
-    if (sortCol_ == 4) sortAsc_ = !sortAsc_;
-    else { sortCol_ = 4; sortAsc_ = false; }
+    // Column 5 = 修改时间 (X-9 gave time its own column).
+    if (sortCol_ == 5) sortAsc_ = !sortAsc_;
+    else { sortCol_ = 5; sortAsc_ = false; }
     ApplySortAndRefresh();
 }
 
 void ListTabPresenter::OnColumnClick(int col) {
     // REVIEW-UI P2 (L-10): every column now sorts by what its header says
-    // (分类 / 风险 / 项目 / 大小 / 时间) instead of funnelling into size-or-time.
+    // (分类 / 风险 / 项目 / 大小 / 详情 / 修改时间).
     if (sortCol_ == col) sortAsc_ = !sortAsc_;
     else { sortCol_ = col; sortAsc_ = false; }
     ApplySortAndRefresh();
@@ -294,6 +392,7 @@ void ListTabPresenter::ApplySortAndRefresh() {
     // REVIEW-UI P0 (L-1): capture check state BEFORE the permutation — the
     // rows' lParams are only consistent with the pre-sort snapshot order.
     CaptureCheckState();
+    CaptureViewState();   // X-7
     auto& items = snapshot_;   // UI-private (REVIEW P1-1)
     if (items.empty()) return;
 
@@ -328,7 +427,13 @@ void ListTabPresenter::ApplySortAndRefresh() {
                     return asc ? (a.sizeBytes < b.sizeBytes) : (a.sizeBytes > b.sizeBytes);
                 });
             break;
-        case 4:   // 时间 (last write)
+        case 4:   // 详情 (text)
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (a.detail < b.detail) : (a.detail > b.detail);
+                });
+            break;
+        case 5:   // 修改时间 (last write)
             std::stable_sort(items.begin(), items.end(),
                 [asc](const ScanItem& a, const ScanItem& b) {
                     return asc ? (a.createTime < b.createTime)
@@ -441,6 +546,12 @@ void SearchPresenter::SetQuery(const std::wstring& text, bool matchPath) {
 
 void SearchPresenter::Refresh() {
     // Results were stored by the worker under the service lock; pull a copy.
+    // review-04 R-5: capture the user's explicit checks BEFORE replacing the
+    // snapshot — same contract as the base class (L-1), otherwise an
+    // explicitly unchecked search row reverts to `recommended` on the next
+    // search-done refresh.
+    CaptureCheckState();
+    CaptureViewState();   // X-7
     snapshot_ = SessionService::Instance().Results(tab_);
     RenderItems();
 }

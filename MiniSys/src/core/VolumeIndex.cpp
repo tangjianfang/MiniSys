@@ -284,9 +284,21 @@ bool VolumeIndex::BuildFull(wchar_t drive,
             names_.clear();
             MFT_ENUM_DATA_V1 medV1{};
             MFT_ENUM_DATA_V0 medV0{};
+            // review-03 root-cause fix: live diagnostics showed the enum
+            // ending after ONE batch of 27 records — exactly the MFT
+            // metadata files whose USN is 0. Zeroed LowUsn/HighUsn are
+            // honored as a USN==0 bound by this volume driver (contrary to
+            // the "zero disables filtering" doc reading), so the entire
+            // journal-active volume was filtered out. Bound it explicitly.
+            constexpr USN kUsnMax = 0x7FFFFFFFFFFFFFFFI64;
             if (useV1) {
                 medV1.MinMajorVersion = 2;   // V2 (NTFS) + V3 (ReFS/128-bit IDs)
                 medV1.MaxMajorVersion = 3;
+                medV1.LowUsn = 0;
+                medV1.HighUsn = kUsnMax;
+            } else {
+                medV0.LowUsn = 0;
+                medV0.HighUsn = kUsnMax;
             }
             void* med   = useV1 ? static_cast<void*>(&medV1) : static_cast<void*>(&medV0);
             DWORD medSz = useV1 ? sizeof(medV1) : sizeof(medV0);

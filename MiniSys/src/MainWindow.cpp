@@ -7,6 +7,7 @@
 #include "core/PlanBuilder.h"
 #include "core/SessionService.h"
 #include "core/VolumeIndex.h"
+#include "ui/CommandPalette.h"
 #include "ui/Controls.h"
 #include "ui/Dialogs.h"
 #include "ui/Icons.h"
@@ -138,8 +139,9 @@ int MainWindow::RunMessageLoop() {
     ACCEL acc[] = {
         { FVIRTKEY, VK_F5,      IDC_BTN_SCAN },
         { FVIRTKEY | FCONTROL, 'A', IDC_ACCEL_SELECTALL },
+        { FVIRTKEY | FCONTROL, 'K', IDC_ACCEL_PALETTE },   // v2.10 命令面板
     };
-    HACCEL hAccel = CreateAcceleratorTableW(acc, 2);
+    HACCEL hAccel = CreateAcceleratorTableW(acc, 3);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (hAccel && TranslateAcceleratorW(hwnd_, hAccel, &msg)) continue;
@@ -151,10 +153,16 @@ int MainWindow::RunMessageLoop() {
         }
         // v2.9: Enter in the search box re-runs the query (the cached rows
         // from last session display without running anything; this is the
-        // explicit "refresh").
+        // explicit "refresh"). review-07 X-19 (v2.10): Esc clears it.
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN &&
             GetFocus() == h_.editSearch && taskMode_ == TaskMode::None) {
             RunSearch();
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE &&
+            GetFocus() == h_.editSearch) {
+            SetWindowTextW(h_.editSearch, L"");
+            if (taskMode_ == TaskMode::None) RunSearch();
             continue;
         }
         TranslateMessage(&msg);
@@ -187,6 +195,28 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SIZE:
             OnSize();
             return 0;
+        case WM_DPICHANGED: {
+            // review-07 X-4: the manifest declares PerMonitorV2 but this
+            // message was never handled — after dragging across monitors
+            // the window kept its physical size while LayoutWindow started
+            // scaling for the new DPI (controls overflow). Adopt the
+            // system's suggested rectangle; the WM_SIZE that follows
+            // re-runs the layout at the new scale.
+            auto prc = reinterpret_cast<LPRECT>(lp);
+            SetWindowPos(hwnd_, nullptr, prc->left, prc->top,
+                         prc->right - prc->left, prc->bottom - prc->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+        case WM_GETMINMAXINFO: {
+            // review-07 X-5: no minimum size — below ~936 logical px the
+            // button row clips and on the Apps page targetBtn overlaps
+            // advancedChk (W < 1068). Clamp to the layout's real floor.
+            auto mmi = reinterpret_cast<LPMINMAXINFO>(lp);
+            mmi->ptMinTrackSize.x = UiScale(hwnd_, 980);
+            mmi->ptMinTrackSize.y = UiScale(hwnd_, 560);
+            return 0;
+        }
         case WM_NOTIFY: {
             auto nm = reinterpret_cast<LPNMHDR>(lp);
             if (nm->hwndFrom == h_.tab && nm->code == TCN_SELCHANGE) {
@@ -223,6 +253,16 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     case CDDS_PREPAINT:
                         return CDRF_NOTIFYITEMDRAW;
                     case CDDS_ITEMPREPAINT: {
+                        // review-07 X-14 (v2.10): skip the risk tints under
+                        // high-contrast themes — fixed warm colours on an
+                        // unpredictable background can be unreadable; the
+                        // badge column carries the information anyway.
+                        HIGHCONTRASTW hc{ sizeof(hc) };
+                        if (SystemParametersInfoW(SPI_GETHIGHCONTRAST,
+                                                  sizeof(hc), &hc, 0) &&
+                            (hc.dwFlags & HCF_HIGHCONTRASTON)) {
+                            return CDRF_DODEFAULT;
+                        }
                         auto* p = dynamic_cast<ListTabPresenter*>(ActivePresenter());
                         const ScanItem* it = p ? p->ItemAtRow(
                             static_cast<int>(lpnmcd->nmcd.dwItemSpec)) : nullptr;
@@ -276,6 +316,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                             auto idx = static_cast<size_t>(tvi.lParam);
                             if (idx < items.size()) {
                                 ftp->SetFocusRoot(items[idx].path);
+                                // review-07 X-11 (v2.10): say WHERE the view
+                                // is now and how to get back.
+                                ShowHint(L"ℹ 已下钻到 " + items[idx].path.wstring() +
+                                         L"（再点一次“扫描”返回全盘视图）");
                                 OnScan();   // scan the drilled subtree
                             }
                         }
@@ -302,6 +346,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_BTN_QUICKFILTER:
                     OnQuickFilterMenu();
                     break;
+                case IDC_ACCEL_PALETTE:
+                    OnCommandPalette();
+                    break;
                 case IDC_BTN_UNDO:
                     if (CurrentTab() == TabId::History) {
                         static_cast<HistoryPresenter*>(
@@ -326,6 +373,16 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     SaveSettings();
                     break;
                 case IDC_ACCEL_SELECTALL:
+                    // review-07 X-2: with focus in an edit box Ctrl+A must
+                    // select the TEXT, not flip every list checkbox.
+                    if (HWND focus = GetFocus()) {
+                        wchar_t cls[8] = {};
+                        GetClassNameW(focus, cls, 8);
+                        if (wcscmp(cls, L"Edit") == 0) {
+                            SendMessageW(focus, EM_SETSEL, 0, -1);
+                            break;
+                        }
+                    }
                     OnSelectAll();
                     break;
                 // List context menu (REVIEW P2 / 07-X24).
@@ -338,11 +395,18 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDM_LIST_SELECTALL:
                 case IDM_LIST_SELECTNONE: {
+                    // review-04 R-2: same batch guard as Ctrl+A — without
+                    // it the loop storms LVN_ITEMCHANGED (O(N²) freezes) and
+                    // the exec button count goes stale.
                     bool on = (LOWORD(wp) == IDM_LIST_SELECTALL);
+                    auto* lp2 = dynamic_cast<ListTabPresenter*>(ActivePresenter());
+                    if (lp2) lp2->SetBatchUpdate(true);
                     int n = ListView_GetItemCount(h_.list);
                     for (int i = 0; i < n; ++i) {
                         ListView_SetCheckState(h_.list, i, on ? TRUE : FALSE);
                     }
+                    if (lp2) lp2->SetBatchUpdate(false);
+                    UpdateExecButton();
                     break;
                 }
                 case IDM_LIST_PREVIEW:   OnPreviewExecution(); break;
@@ -376,6 +440,8 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             UpdateStatusBar();
             return 0;
         case WM_APP_SCAN_DONE:
+            // review-04 R-4: drop stale completions from superseded tasks.
+            if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnScanDone();
             return 0;
         case WM_APP_TASK_STARTED:
@@ -384,16 +450,20 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             // REVIEW-UI P1 (04-4): gate on IsBusy — if the worker already
             // finished (its OP_DONE was queued first), locking now would
             // deadlock the matrix forever.
-            if (SessionService::Instance().IsBusy()) {
+            // R-4: plus the generation gate (stale START of an old task).
+            if (wp == SessionService::Instance().CurrentTaskGen() &&
+                SessionService::Instance().IsBusy()) {
                 SetTaskBusy(TaskMode::Executing);
                 UpdateStatusBar();
             }
             return 0;
         case WM_APP_OP_DONE:
+            if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnPlanDone();
             return 0;
         case WM_APP_SEARCH_DONE:
             // REVIEW-UI P1 (04-1/U-1): async search completed on the worker.
+            if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             if (CurrentTab() == TabId::Search) {
                 if (auto* p = ActivePresenter()) p->Refresh();
                 UpdateSearchStatus();
@@ -401,10 +471,12 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             UpdateStatusBar();
             return 0;
         case WM_APP_VERIFY_DONE:
+            if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnVerifyDone();
             UpdateStatusBar();
             return 0;
         case WM_APP_PREVIEW_DONE:
+            if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnPreviewDone();
             UpdateStatusBar();
             return 0;
@@ -427,6 +499,25 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             } else if (wp == TIMER_VERIFY_LIST) {
                 KillTimer(hwnd_, TIMER_VERIFY_LIST);
                 OnVerifyList(/*manual=*/false);
+            } else if (wp == TIMER_IDLE_COUNTDOWN) {
+                // v2.10 (X-10): grace countdown for the idle rescan — any
+                // global input since arming cancels it.
+                KillTimer(hwnd_, TIMER_IDLE_COUNTDOWN);
+                LASTINPUTINFO li{ sizeof(li) };
+                if (idleCountdown_ <= 0 || !GetLastInputInfo(&li) ||
+                    li.dwTime != idleArmInput_ || taskMode_ != TaskMode::None) {
+                    idleCountdown_ = 0;
+                    return 0;   // user came back — cancelled
+                }
+                --idleCountdown_;
+                if (idleCountdown_ > 0) {
+                    ShowHint(FormatW(L"ℹ 系统空闲 — %d 秒后自动刷新本页扫描结果（动一下鼠标或键盘即取消）",
+                                     idleCountdown_));
+                    SetTimer(hwnd_, TIMER_IDLE_COUNTDOWN, 1000, nullptr);
+                    return 0;
+                }
+                ShowHint(L"ℹ 系统空闲 — 正在自动刷新本页扫描结果…");
+                OnScan();
             }
             return 0;
         case WM_ACTIVATE:
@@ -547,9 +638,22 @@ void MainWindow::OnQuickFilterMenu() {
     };
 
     HMENU m = CreatePopupMenu();
+    wchar_t cur[512] = {};
+    GetWindowTextW(h_.editSearch, cur, 512);
+    std::wstring curLower = ToLower(cur);
     for (const auto& p : kPresets) {
-        if (!p.label) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        else          AppendMenuW(m, MF_STRING, p.id, p.label);
+        if (!p.label) {
+            AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        } else {
+            // review-07 X-8: mark the active preset so "what am I filtering
+            // by" is visible on the menu itself.
+            UINT flags = MF_STRING;
+            if (p.token[0] &&
+                curLower.find(ToLower(p.token)) != std::wstring::npos) {
+                flags |= MF_CHECKED;
+            }
+            AppendMenuW(m, flags, p.id, p.label);
+        }
     }
     RECT rc{};
     GetWindowRect(h_.btnQuickFilter, &rc);
@@ -575,6 +679,10 @@ void MainWindow::OnQuickFilterMenu() {
     }
 
     if (taskMode_ == TaskMode::None) {
+        // review-07 X-8: SetWindowText above fired EN_CHANGE which armed the
+        // 200 ms debounce — kill it or the query runs twice (the second run
+        // cancelling and restarting the first for nothing).
+        KillTimer(hwnd_, TIMER_SEARCH_DEBOUNCE);
         RunSearch();
     } else {
         // Index still building (most common busy case here) — OnScanDone
@@ -607,19 +715,22 @@ void MainWindow::OnVerifyList(bool manual) {
 void MainWindow::OnVerifyDone() {
     auto& svc = SessionService::Instance();
     auto dead = svc.LastDeadPaths();
-    if (dead.empty()) {
-        ShowHint(L"✓ 列表已校验，未发现已删除的项目。");
-        return;
-    }
+    // review-07 X-3: nothing removed → silent success (pane2 already says
+    // "校验完成"). This used to clobber the info dashboard on EVERY Alt-Tab.
+    if (dead.empty()) return;
     auto tab = svc.LastVerifyTab();
     if (tab < TabId::Junk || tab >= TabId::Count) return;
     auto* lp = dynamic_cast<ListTabPresenter*>(
         presenters_[static_cast<size_t>(tab)].get());
     if (!lp) return;
-    size_t removed = lp->ApplyDeadPaths(dead);
+    // review-04 R-1: the user may have switched tabs while the verify ran —
+    // only the ACTIVE tab may render into the shared ListView; a background
+    // tab prunes silently and shows its updated list on next activation.
+    bool active = (CurrentTab() == tab);
+    size_t removed = lp->ApplyDeadPaths(dead, /*render=*/active);
     if (removed > 0) {
         ShowHint(FormatW(L"ℹ 已移除 %zu 项（在磁盘上已不存在，可能已被手动删除）。", removed));
-        if (CurrentTab() == tab) UpdateExecButton();
+        if (active) UpdateExecButton();
     }
 }
 
@@ -630,6 +741,57 @@ void MainWindow::OnPreviewDone() {
                                    rpt.pass, rpt.denied, rpt.details.c_str());
     MessageBoxW(hwnd_, content.c_str(), L"预览执行（不会做任何更改）",
                 MB_OK | MB_ICONINFORMATION);
+}
+
+// v2.10 (review-07 blueprint #5): Ctrl+K command palette — every buried
+// action at zero depth.
+void MainWindow::OnCommandPalette() {
+    std::vector<palette::Command> cmds;
+    auto add = [&](const wchar_t* name, std::function<void()> run) {
+        cmds.push_back({ name, std::move(run) });
+    };
+
+    bool searchTab = (CurrentTab() == TabId::Search);
+    add(searchTab ? L"重建索引" : L"扫描当前页（F5）", [this] { OnScan(); });
+    add(L"刷新列表 — 移除已手动删除的项", [this] { OnVerifyList(true); });
+    add(L"全选 / 全不选切换（Ctrl+A）", [this] { OnSelectAll(); });
+    add(L"预览执行 — 安全闸检查", [this] { OnPreviewExecution(); });
+    add(L"清空隔离区…", [this] { OnEmptyQuarantine(); });
+    add(L"关于 MiniSys", [this] { OnAbout(); });
+
+    struct TabCmd { const wchar_t* name; TabId tab; };
+    static const TabCmd kTabs[] = {
+        { L"切换到 垃圾清理",   TabId::Junk },
+        { L"切换到 文件搜索",   TabId::Search },
+        { L"切换到 大文件/去重", TabId::LargeFiles },
+        { L"切换到 应用迁移",   TabId::Apps },
+        { L"切换到 文件夹分析", TabId::FolderTree },
+        { L"切换到 操作历史",   TabId::History },
+    };
+    for (const auto& t : kTabs) {
+        add(t.name, [this, tab = t.tab] {
+            TabCtrl_SetCurSel(h_.tab, static_cast<int>(tab));
+            OnTabChanged();
+        });
+    }
+
+    // Quick filters jump to the search tab and apply the token.
+    auto quickFilter = [this](const wchar_t* token) {
+        TabCtrl_SetCurSel(h_.tab, static_cast<int>(TabId::Search));
+        OnTabChanged();
+        wchar_t buf[512] = {};
+        GetWindowTextW(h_.editSearch, buf, 512);
+        SetWindowTextW(h_.editSearch,
+            VolumeIndex::ToggleQueryToken(buf, token).c_str());
+        KillTimer(hwnd_, TIMER_SEARCH_DEBOUNCE);
+        if (taskMode_ == TaskMode::None) RunSearch();
+    };
+    add(L"筛选：调试符号 .pdb", [quickFilter] { quickFilter(L"ext:pdb"); });
+    add(L"筛选：编译中间文件 .obj", [quickFilter] { quickFilter(L"ext:obj"); });
+    add(L"筛选：Debug 文件夹", [quickFilter] { quickFilter(L"folder:debug"); });
+    add(L"筛选：bin 文件夹", [quickFilter] { quickFilter(L"folder:bin"); });
+
+    palette::Show(hwnd_, cmds);
 }
 
 // v2.5 cached results: "上次扫描: …" provenance line, judged per tab.
@@ -645,8 +807,11 @@ std::wstring MainWindow::ComposeScanTimeLine() const {
 
 // v2.5 cached results: while the user has been idle for 5+ minutes and the
 // active tab's data is older than 30 minutes, rescan it automatically.
+// review-07 X-10 (v2.10): with a 10 s grace countdown — any input anywhere
+// in the system cancels, so the rescan never ambushes a returning user.
 void MainWindow::OnIdleCheck() {
     if (taskMode_ != TaskMode::None) return;
+    if (idleCountdown_ > 0) return;   // countdown already armed
     LASTINPUTINFO li{ sizeof(li) };
     if (!GetLastInputInfo(&li)) return;
     DWORD idleMs = GetTickCount() - li.dwTime;
@@ -672,8 +837,10 @@ void MainWindow::OnIdleCheck() {
     }
     if (at != 0 && ageMs < 30ULL * 60 * 1000) return;   // fresh enough
 
-    ShowHint(L"ℹ 系统空闲 — 正在自动刷新本页扫描结果…");
-    OnScan();
+    idleCountdown_ = 10;
+    idleArmInput_ = li.dwTime;
+    ShowHint(L"ℹ 系统空闲 — 10 秒后自动刷新本页扫描结果（动一下鼠标或键盘即取消）");
+    SetTimer(hwnd_, TIMER_IDLE_COUNTDOWN, 1000, nullptr);
 }
 
 void MainWindow::OnTabChanged() {
@@ -820,7 +987,8 @@ void MainWindow::UpdateStatusBar() {
     SendMessageW(h_.status, SB_SETTEXTW, 3,
                  reinterpret_cast<LPARAM>(L""));
 
-    // Overlay the progress bar on the reserved 4th pane.
+    // Overlay the progress bar on the reserved 4th pane. review-07 X-20:
+    // keep clear of the status bar's size grip at the far right.
     RECT pane{};
     if (SendMessageW(h_.status, SB_GETRECT, 3,
                      reinterpret_cast<LPARAM>(&pane))) {
@@ -828,8 +996,10 @@ void MainWindow::UpdateStatusBar() {
         POINT br{ pane.right, pane.bottom };
         MapWindowPoints(h_.status, hwnd_, &tl, 1);
         MapWindowPoints(h_.status, hwnd_, &br, 1);
+        int grip = (W >= static_cast<int>(GetSystemMetrics(SM_CXVSCROLL)))
+                       ? GetSystemMetrics(SM_CXVSCROLL) : 0;
         SetWindowPos(h_.progress, nullptr, tl.x + 2, tl.y + 2,
-                     (br.x - tl.x) - 4, (br.y - tl.y) - 4, SWP_NOZORDER);
+                     (br.x - tl.x) - 4 - grip, (br.y - tl.y) - 4, SWP_NOZORDER);
     }
 }
 
@@ -983,9 +1153,15 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     // 07-X8: CancelScan existed with no caller).
     // REVIEW-UI P1 (L-5): Indexing keeps the TAB control enabled —
     // switching tabs is browsing, not acting.
+    // review-07 X-12: Indexing doesn't touch results_ either — the cached
+    // lists stay browsable/sortable/checkable while the index builds (the
+    // same read-only-browsing reasoning as verify/preview in v2.8).
     // REVIEW-UI P1 (04-2): editSearch/chkMatchPath join the matrix.
+    bool lockBrowse = (mode == TaskMode::Scanning || mode == TaskMode::Executing);
+    for (HWND h : { h_.list, h_.tree, h_.btnSortSize, h_.btnSortTime }) {
+        if (h) EnableWindow(h, lockBrowse ? FALSE : TRUE);
+    }
     for (HWND h : { h_.exec, h_.undo, h_.emptyQ, h_.open,
-                    h_.btnSortSize, h_.btnSortTime, h_.list, h_.tree,
                     h_.targetBtn, h_.advancedChk,
                     h_.editSearch, h_.chkMatchPath, h_.btnQuickFilter }) {
         if (h) EnableWindow(h, scanning ? FALSE : (busy ? FALSE : TRUE));
@@ -1072,7 +1248,9 @@ void MainWindow::UpdateExecButton() {
         EnableWindow(h_.exec, FALSE);
     } else {
         EnableWindow(h_.exec, TRUE);
-        SetWindowTextW(h_.exec, FormatW(L"执行选中操作（%zu 项 · %s）",
+        // review-07 X-15 (v2.10): compact form — the old label clipped at
+        // the fixed button width ("…（123 项 · 123.4GB）" lost the tail).
+        SetWindowTextW(h_.exec, FormatW(L"执行（%zu 项·%s）",
                                         actionable, FormatSize(total).c_str())
                            .c_str());
     }
@@ -1184,6 +1362,23 @@ void MainWindow::OnExecute() {
     }
     if (!dangerousNames.empty()) {
         groups += L"\n涉及: " + dangerousNames + L"\n";
+    }
+    // review-07 X-13 (v2.10): the actual item list — "🛡 安全 28 项" without
+    // names asked users to confirm blind. First 12 + overflow line.
+    {
+        std::wstring names;
+        size_t shown = 0;
+        for (auto idx : selected) {
+            if (shown >= 12) break;
+            const auto& it = items[idx];
+            names += FormatW(L"· %s — %s\n", it.title.c_str(),
+                             FormatSize(it.sizeBytes).c_str());
+            ++shown;
+        }
+        if (selected.size() > shown) {
+            names += FormatW(L"…（共 %zu 项）\n", selected.size());
+        }
+        groups += L"\n【项目清单】\n" + names;
     }
 
     std::wstring confirm = FormatW(
@@ -1325,7 +1520,7 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.9";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.10";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"

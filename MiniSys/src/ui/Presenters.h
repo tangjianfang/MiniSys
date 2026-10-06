@@ -67,9 +67,12 @@ public:
     // v2.7/v2.8: drop rows whose path no longer exists on disk (deleted
     // outside the tool). The disk checks run on the SessionService worker
     // (VerifyPathsAsync); this applies the worker's dead-path list
-    // (lowercased) to the snapshot, re-renders and syncs the service-side
-    // results. Returns how many were removed.
-    size_t ApplyDeadPaths(const std::vector<std::wstring>& deadLower);
+    // (lowercased) to the snapshot and syncs the service-side results.
+    // render=false prunes silently — review-04 R-1: the shared ListView
+    // belongs to the ACTIVE tab; rendering a background tab's rows into it
+    // corrupts the display and the lParam↔snapshot mapping.
+    size_t ApplyDeadPaths(const std::vector<std::wstring>& deadLower,
+                          bool render = true);
 
     // REVIEW P1-1: the presenter renders from its own UI-private snapshot
     // — never from the worker-owned storage. Plans are built from it too.
@@ -84,8 +87,8 @@ public:
 protected:
     UiHandles ui_;
     // REVIEW-UI P2 (L-10): sortCol_ now stores the actual COLUMN index
-    // (0 分类 / 1 风险 / 2 项目 / 3 大小 / 4 详情→时间); the header shows a
-    // direction arrow for the active column.
+    // (0 分类 / 1 风险 / 2 项目 / 3 大小 / 4 详情 / 5 修改时间); the header
+    // shows a direction arrow for the active column.
     int  sortCol_ = -1;
     bool sortAsc_ = false; // false = descending
     std::vector<ScanItem> snapshot_;   // UI-private copy (REVIEW P1-1)
@@ -93,8 +96,16 @@ protected:
     // survives sorts, tab switches and data refreshes.
     std::map<std::wstring, bool> checkStateByPath_;
     bool batchUpdate_ = false;
+    // review-07 X-7 (v2.10): view state survives full re-renders (sort,
+    // tab round-trips, verify prunes, search refresh) — top row, focus and
+    // selection, keyed by path like the check state.
+    std::wstring viewTopPath_;
+    std::wstring viewFocusPath_;
+    std::vector<std::wstring> viewSelPaths_;
 
     void CaptureCheckState();          // call before permuting/replacing snapshot_
+    void CaptureViewState();           // X-7: same timing rule as above
+    void RestoreViewState();           // X-7: after the insert loop
     void RenderItems();
 
 private:

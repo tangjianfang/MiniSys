@@ -1,6 +1,9 @@
 #include "core/DevBuildCache.h"
+#include "core/SessionService.h"
 #include "core/VolumeIndex.h"
 #include "util/DirSizeCache.h"
+#include "util/Json.h"
+#include "util/StringUtils.h"
 
 #include <gtest/gtest.h>
 
@@ -41,6 +44,51 @@ TEST(DirSizeCache, MtimeKeyControlsReuse) {
     EXPECT_EQ(DirSizeCache::Instance().SizeOf(base, mt, 0), 5u);
     // Different mtime → recomputed (same result, fresh walk).
     EXPECT_EQ(DirSizeCache::Instance().SizeOf(base, mt + 100000, 0), 5u);
+    std::filesystem::remove_all(base, ec);
+}
+
+// ---- v2.10 security: the results cache is user-writable input to an
+// elevated process — tampered Delegate items must be dropped on load
+// (review-05 T-B1, second defense layer).
+TEST(CacheTrust, TamperedDelegateItemDroppedOnLoad) {
+    auto base = std::filesystem::temp_directory_path() /
+                (L"minisys-cachetrust-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code ec;
+    std::filesystem::remove_all(base, ec);
+    std::filesystem::create_directories(base / L"cache");
+    SessionService::SetCacheDirForTesting(base);
+
+    Json root = Json::Object();
+    root.Set(L"tab", Json(0.0));
+    root.Set(L"scanAt", Json(1.0));
+    Json items = Json::Array();
+    Json evil = Json::Object();
+    evil.Set(L"title", Json(L"伪造委派项"));
+    evil.Set(L"path", Json(L"C:\\some\\file.txt"));
+    evil.Set(L"strategy", Json(1.0));            // CleanStrategy::Delegate
+    evil.Set(L"command", Json(L"cmd /c calc.exe"));
+    items.Push(evil);
+    Json benign = Json::Object();
+    benign.Set(L"title", Json(L"普通文件"));
+    benign.Set(L"path", Json(L"C:\\Users\\x\\a.txt"));
+    benign.Set(L"strategy", Json(0.0));          // Quarantine
+    items.Push(benign);
+    root.Set(L"items", items);
+
+    auto file = base / L"cache" / L"results-0.json";
+    {
+        std::ofstream f(file, std::ios::binary | std::ios::trunc);
+        f << WideToUtf8(root.Dump());
+    }
+
+    auto& svc = SessionService::Instance();
+    svc.StoreResults(TabId::Junk, {});           // in-memory list empty → cache loads
+    EXPECT_TRUE(svc.TryLoadCachedResults(TabId::Junk));
+    auto loaded = svc.Results(TabId::Junk);
+    ASSERT_EQ(loaded.size(), 1u);                // the tampered item is GONE
+    EXPECT_EQ(loaded[0].title, L"普通文件");
+
+    SessionService::SetCacheDirForTesting({});
     std::filesystem::remove_all(base, ec);
 }
 

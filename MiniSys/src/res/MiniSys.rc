@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "MiniSys"
             VALUE "FileDescription", "MiniSys - C Drive Cleaner & Migrator"
-            VALUE "FileVersion", "2.2.0.0"
+            VALUE "FileVersion", "2.10.0.0"
             VALUE "InternalName", "MiniSys"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "MiniSys.exe"
             VALUE "ProductName", "MiniSys"
-            VALUE "ProductVersion", "2.2.0.0"
+            VALUE "ProductVersion", "2.10.0.0"
         END
     END
     BLOCK "VarFileInfo"

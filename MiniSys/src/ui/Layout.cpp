@@ -116,7 +116,29 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     // infoY + Scale(40) while the info label is Scale(52) tall — the label
     // (higher in z-order) covered the top half of the column headers.
     // The list now starts strictly BELOW the info label.
+    // review-07 X-6 (v2.10): the height follows the actual text (1-6 lines,
+    // DT_CALCRECT) — the fixed 52px clipped the 4-8 line compositions that
+    // exist since v2.5 (dashboard + notices + provenance + description).
     int infoH = Scale(52, dpi);
+    {
+        wchar_t buf[2048] = {};
+        int len = GetWindowTextW(ui.info, buf, 2048);
+        if (len > 0) {
+            HDC dc = GetDC(ui.main);
+            HGDIOBJ old = SelectObject(dc, reinterpret_cast<HGDIOBJ>(
+                SendMessageW(ui.info, WM_GETFONT, 0, 0)));
+            RECT rc{ 0, 0, W - 2 * pad - Scale(8, dpi), 0 };
+            DrawTextW(dc, buf, len, &rc,
+                      DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+            SelectObject(dc, old);
+            ReleaseDC(ui.main, dc);
+            int lineH = Scale(15, dpi);
+            int lines = (rc.bottom + lineH - 1) / lineH;
+            if (lines < 1) lines = 1;
+            if (lines > 6) lines = 6;   // cap — extremely long hints fold
+            infoH = lines * lineH + Scale(8, dpi);
+        }
+    }
     SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, infoH, SWP_NOZORDER);
 
     int contentY = infoY + infoH + Scale(4, dpi);

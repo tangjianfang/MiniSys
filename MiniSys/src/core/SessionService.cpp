@@ -3,6 +3,7 @@
 #include "core/DeleteOp.h"
 #include "core/DelegateOp.h"
 #include "core/GuardRails.h"
+#include "core/JunkRules.h"
 #include "core/MoveJunctionOp.h"
 #include "core/OperationLog.h"
 #include "core/QuarantineOp.h"
@@ -64,7 +65,19 @@ void SessionService::SetProgress(const std::wstring& text) {
 }
 
 void SessionService::Post(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (hwnd) PostMessageW(hwnd, msg, wp, lp);
+    if (!hwnd) return;
+    // review-04 R-4 (v2.10): completion messages carry the task generation
+    // in wParam so the UI can drop stale ones (posted by a task that
+    // finished after a NEWER task already started). PROGRESS messages keep
+    // their payload in wp/lp — staleness there is cosmetic and self-heals
+    // on the next tick.
+    if (wp == 0 &&
+        (msg == WM_APP_SCAN_DONE || msg == WM_APP_OP_DONE ||
+         msg == WM_APP_SEARCH_DONE || msg == WM_APP_VERIFY_DONE ||
+         msg == WM_APP_PREVIEW_DONE || msg == WM_APP_TASK_STARTED)) {
+        wp = static_cast<WPARAM>(taskGen_.load());
+    }
+    PostMessageW(hwnd, msg, wp, lp);
 }
 
 std::wstring SessionService::ProgressText() const {
@@ -98,8 +111,14 @@ namespace {
 // kMaxCachedItems rows to bound the file size.
 constexpr size_t kMaxCachedItems = 5000;
 
+// Path override for unit tests (empty = default location).
+std::filesystem::path g_cacheDirOverride;
+
 std::filesystem::path ResultsCachePath(TabId tab) {
-    return std::filesystem::path(AppDataDir()) / L"cache" /
+    auto base = g_cacheDirOverride.empty()
+        ? std::filesystem::path(AppDataDir())
+        : g_cacheDirOverride;
+    return base / L"cache" /
            (L"results-" + std::to_wstring(static_cast<int>(tab)) + L".json");
 }
 
@@ -197,6 +216,10 @@ void SessionService::NoteScanTime(TabId tab) {
         (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
+void SessionService::SetCacheDirForTesting(const std::filesystem::path& p) {
+    g_cacheDirOverride = p;
+}
+
 uint64_t SessionService::LastScanAt(TabId tab) const {
     std::lock_guard<std::mutex> g(resultsMu_);
     return scanAt_[static_cast<size_t>(tab)];
@@ -239,6 +262,30 @@ bool SessionService::TryLoadCachedResults(TabId tab) {
         if (items.empty()) return false;
         uint64_t scanAt = static_cast<uint64_t>(j.Get(L"scanAt").AsNumber());
 
+        // review-05 (T-B1, CONFIRMED): the cache lives in user-writable
+        // LOCALAPPDATA and this process runs elevated — sanitize everything
+        // executable on load. Delegate items whose command does not pass
+        // the built-in whitelist are dropped outright (the execution-side
+        // re-check in RunPlan is the second layer).
+        {
+            std::vector<ScanItem> safe;
+            safe.reserve(items.size());
+            for (auto& it : items) {
+                if (it.strategy == CleanStrategy::Delegate) {
+                    std::wstring denyReason;
+                    if (!JunkRules::DelegateCommandAllowed(it.command, denyReason)) {
+                        MS_LOG_WARN(L"Cached Delegate item dropped (tab %d): %s — %s",
+                                    static_cast<int>(tab), it.title.c_str(),
+                                    denyReason.c_str());
+                        continue;
+                    }
+                }
+                safe.push_back(std::move(it));
+            }
+            items.swap(safe);
+            if (items.empty()) return false;
+        }
+
         std::lock_guard<std::mutex> g(resultsMu_);
         if (!results_[static_cast<size_t>(tab)].empty()) return false;
         results_[static_cast<size_t>(tab)]    = std::move(items);
@@ -257,6 +304,7 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
     if (!taskKind_.compare_exchange_strong(expected, static_cast<int>(kind))) {
         return false;   // busy
     }
+    taskGen_.fetch_add(1);   // R-4: this task's completion messages carry this gen
     if (worker_.joinable()) worker_.join();
     cancelScan_.store(false);
     worker_ = std::thread([this, kind, body = std::move(body)]() mutable {        // Shell operations (IFileOperation) need COM on this thread.
@@ -277,7 +325,7 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
         // post the completion message for the task kind.
         if (threw && hwnd_) {
             SetProgress(L"⚠ 任务异常中断（详见日志）");
-            PostMessageW(hwnd_, DoneMessageFor(kind), 0, 0);
+            Post(hwnd_, DoneMessageFor(kind));   // R-4: gen-stamped
         }
         if (com) CoUninitialize();
         taskKind_.store(static_cast<int>(TaskKind::None));
@@ -532,7 +580,24 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
             if (ok) rpt.freedBytes += si.sizeBytes;
         } else if (si.strategy == CleanStrategy::Delegate && !si.command.empty()) {
             // Delegated system command (WinSxS/hiberfil — ADR-008). Not a
-            // file operation; the command comes from the rule table only.
+            // file operation. review-05 (T-B1, CONFIRMED): the "command
+            // comes from the rule table only" assumption broke with the
+            // v2.5 results cache (user-writable JSON restores strategy +
+            // command verbatim). The whitelist is re-checked HERE — the
+            // execution choke point — regardless of where the item came
+            // from (rule table, cache, or any future source).
+            {
+                std::wstring denyReason;
+                if (!JunkRules::DelegateCommandAllowed(si.command, denyReason)) {
+                    ++rpt.skipped;
+                    rpt.details += FormatW(
+                        L"⊘ %s: 委派命令未过白名单（%s）——已拒绝\n",
+                        si.title.c_str(), denyReason.c_str());
+                    MS_LOG_WARN(L"Delegate command rejected at execution: %s — %s",
+                                si.title.c_str(), denyReason.c_str());
+                    continue;
+                }
+            }
             SetProgress(FormatW(L"委派 %d/%d: %s", done, total, si.title.c_str()));
             Post(hwnd, WM_APP_OP_PROGRESS,
                  total > 0 ? static_cast<WPARAM>((done - 1) * 100 / total) : 0);

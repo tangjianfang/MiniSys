@@ -38,6 +38,13 @@ public:
     bool IsSearching() const { return taskKind_.load() == static_cast<int>(TaskKind::Searching); }
     void CancelScan() { cancelScan_.store(true); }
 
+    // review-04 R-4 fix (v2.10): monotonic task generation. Every DONE /
+    // TASK_STARTED message carries the generation of the task that posted
+    // it (in wParam); a message from an older task is stale — a new task
+    // already started — and the UI must ignore it instead of unlocking the
+    // action matrix underneath the running task.
+    uint64_t CurrentTaskGen() const { return taskGen_.load(); }
+
     // ---- scanning --------------------------------------------------------
     // Returns false when another task is running.
     bool StartScan(TabId tab, std::unique_ptr<Scanner> scanner);
@@ -98,6 +105,9 @@ public:
     // stamps on each completed query, not just scanners).
     void NoteScanTime(TabId tab);
 
+    // Redirect the results-cache base directory (unit tests only).
+    static void SetCacheDirForTesting(const std::filesystem::path& p);
+
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
 
@@ -153,6 +163,7 @@ private:
     HWND hwnd_ = nullptr;
     std::thread worker_;
     std::atomic<int> taskKind_{0};          // TaskKind
+    std::atomic<uint64_t> taskGen_{0};      // R-4: stamps DONE messages
     std::atomic<bool> cancelScan_{false};
     mutable std::mutex progressMu_;
     std::wstring progressText_;

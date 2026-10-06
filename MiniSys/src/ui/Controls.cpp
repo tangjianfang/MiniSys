@@ -12,11 +12,14 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.main = parent;
 
     h.tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_TABCTRL), inst, nullptr);
 
+    // review-07 X-1: WS_TABSTOP on the list/tree (and the settings edits
+    // below) — Tab used to cycle only the buttons, the 1000-row result
+    // list was keyboard-unreachable.
     h.list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_LISTVIEW), inst, nullptr);
     // REVIEW-UI P2 (L-11): LABELTIP — truncated cells (the detail column's
     // long paths) get a full-text tooltip instead of a silent clip.
@@ -58,7 +61,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_CHOOSE_TARGET), inst, nullptr);
     h.advancedChk = CreateWindowExW(0, L"BUTTON", L"高级模式(Symlink)",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_ADVANCED), inst, nullptr);
     h.info = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
@@ -88,13 +91,13 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
         WS_CHILD | WS_VISIBLE | SS_RIGHT,
         0, 0, 0, 0, parent, nullptr, inst, nullptr);
     h.editFileType = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_FILETYPE), inst, nullptr);
     h.lblDrives = CreateWindowExW(0, L"STATIC", L"扫描磁盘(C;D; 空=默认):",
         WS_CHILD | WS_VISIBLE | SS_RIGHT,
         0, 0, 0, 0, parent, nullptr, inst, nullptr);
     h.editDrives = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_DRIVES), inst, nullptr);
 
     // ---- v2.3: instant search row (hidden by default, search tab only) ----

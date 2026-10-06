@@ -378,7 +378,7 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
 
     // ---- 5. Recycle bin (special item; executed via EmptyRecycleOp) ----
     if (!cancel.load()) {
-        if (progress) progress(0, 0, L"Recycle Bin");
+        if (progress) progress(0, 0, L"回收站");
         RecycleBinInfo info;
         if (QueryRecycleBin(info) && info.sizeBytes > 0) {
             ScanItem it;
@@ -393,7 +393,7 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
             out.push_back(std::move(it));
         }
     }
-    if (progress) progress(0, 0, L"Done");
+    if (progress) progress(0, 0, L"完成");
 }
 
 } // namespace minisys

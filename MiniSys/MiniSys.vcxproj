@@ -125,6 +125,7 @@
     <ClCompile Include="src\util\DirSizeCache.cpp" />
     <ClCompile Include="src\util\FastWalk.cpp" />
     <ClCompile Include="src\ui\Presenters.cpp" />
+    <ClCompile Include="src\ui\CommandPalette.cpp" />
     <ClCompile Include="src\ui\Icons.cpp" />
     <ClCompile Include="src\ui\Layout.cpp" />
     <ClCompile Include="src\ui\Controls.cpp" />
@@ -166,6 +167,7 @@
     <ClInclude Include="src\util\FastWalk.h" />
     <ClInclude Include="src\ui\UiHandles.h" />
     <ClInclude Include="src\ui\Presenters.h" />
+    <ClInclude Include="src\ui\CommandPalette.h" />
     <ClInclude Include="src\ui\Icons.h" />
     <ClInclude Include="src\ui\Layout.h" />
     <ClInclude Include="src\ui\Controls.h" />
