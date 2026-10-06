@@ -41,6 +41,14 @@
     <OutDir>$(SolutionDir)build\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)build\intermediate\$(ProjectName)\$(Configuration)\</IntDir>
   </PropertyGroup>
+  <!-- v2.10: bump the build counter and (re)generate src/res/version.h on
+       every app build — title bar / About / exe properties all read it. -->
+  <ItemDefinitionGroup>
+    <PreBuildEvent>
+      <Command>call "$(ProjectDir)..\tools\incr_build.bat"</Command>
+      <Message>Incrementing build number (version.h)</Message>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>

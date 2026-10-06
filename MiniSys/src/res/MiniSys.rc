@@ -1,12 +1,15 @@
 #include <windows.h>
 #include "resource.h"
+// v2.10: single source of truth — tools/incr_build.bat regenerates this
+// on every app build (title bar and About read it too).
+#include "version.h"
 
 // App logo: blue rounded tile + white drive + green down arrow (space freed).
 IDI_APPICON ICON "app.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,2,0,0
- PRODUCTVERSION 2,2,0,0
+ FILEVERSION MINISYS_VERSION_RC
+ PRODUCTVERSION MINISYS_VERSION_RC
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -19,12 +22,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "MiniSys"
             VALUE "FileDescription", "MiniSys - C Drive Cleaner & Migrator"
-            VALUE "FileVersion", "2.10.0.0"
+            VALUE "FileVersion", MINISYS_VERSION_STR
             VALUE "InternalName", "MiniSys"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "MiniSys.exe"
             VALUE "ProductName", "MiniSys"
-            VALUE "ProductVersion", "2.10.0.0"
+            VALUE "ProductVersion", MINISYS_VERSION_STR
         END
     END
     BLOCK "VarFileInfo"
