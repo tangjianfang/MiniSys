@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -185,25 +186,55 @@ void Scan(std::vector<ScanItem>& out,
     constexpr size_t kMaxDirs = 150000;
     constexpr uint64_t kRecentMs = 24ULL * 3600ULL * 1000ULL;  // skip hot dirs
 
+    // ---- v2.13 incremental discovery (<=5 s warm-scan budget) --------------
+    // The artifact DISCOVERY walk re-visited every directory on each scan
+    // even when nothing changed. NTFS guarantees any direct-child
+    // create/delete/rename bumps the directory's own mtime, so an unchanged
+    // mtime proves the cached SUBTREE artifact list for that directory is
+    // still exact. Cache entries are subtree-scoped and the walk recursive
+    // (depth is capped anyway), so a hit answers for everything below.
+    struct ArtifactRef { std::wstring path; uint64_t mtime; };
+    struct DirEntryCache {
+        uint64_t mtime = 0;                       // dir mtime at last walk
+        std::vector<ArtifactRef> artifacts;       // subtree artifacts then
+    };
+    static std::mutex cacheMu;
+    static std::map<std::wstring, DirEntryCache> dirCache;   // session-wide
+
     uint64_t now = NowFiletime();
     std::vector<FoundDir> found;      // artifact dirs pending size computation
-    size_t visited = 0;
+    size_t visited = 0, cachedHits = 0;
 
-    std::vector<std::pair<fs::path, int>> stack;
-    for (auto& r : SearchRoots()) stack.push_back({ r, 0 });
-
-    std::vector<WIN32_FIND_DATAW> entries;
-    while (!stack.empty() && found.size() < kMaxCandidates && visited < kMaxDirs) {
-        if (cancel.load()) return;
-        auto [dir, depth] = stack.back();
-        stack.pop_back();
+    // Recursive subtree walk; returns the subtree's artifacts and keeps the
+    // cache in sync. (Depth <= kMaxDepth keeps the stack tiny.)
+    std::function<std::vector<ArtifactRef>(const fs::path&, int)> walk =
+        [&](const fs::path& dir, int depth) -> std::vector<ArtifactRef> {
+        if (cancel.load()) return {};
         ++visited;
         if ((visited & 127) == 0 && progress) {
             progress(visited, 0, L"开发缓存: " + dir.wstring());
         }
 
-        entries.clear();
-        if (!ListDir(dir, entries)) continue;
+        // Directory mtime (child changes bump it — the cache key).
+        WIN32_FILE_ATTRIBUTE_DATA dad{};
+        uint64_t dirMtime = 0;
+        if (GetFileAttributesExW(LongPath(dir).c_str(), GetFileExInfoStandard,
+                                 &dad)) {
+            dirMtime = FiletimeOf(dad);
+        }
+
+        std::wstring key = ToLower(dir.wstring());
+        {
+            std::lock_guard<std::mutex> g(cacheMu);
+            auto it = dirCache.find(key);
+            if (it != dirCache.end() && it->second.mtime == dirMtime) {
+                ++cachedHits;
+                return it->second.artifacts;   // no listing, no descending
+            }
+        }
+
+        std::vector<WIN32_FIND_DATAW> entries;
+        if (!ListDir(dir, entries)) return {};
 
         bool hasMarker = false;
         for (const auto& fd : entries) {
@@ -214,6 +245,7 @@ void Scan(std::vector<ScanItem>& out,
             }
         }
 
+        std::vector<ArtifactRef> subtree;
         for (auto& fd : entries) {
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
@@ -221,20 +253,36 @@ void Scan(std::vector<ScanItem>& out,
 
             if (hasMarker && (IsSafeArtifactName(name) || IsCautiousArtifactName(name))) {
                 // Skip dirs touched recently — likely an active build.
-                uint64_t ageMs = (FiletimeOf(fd) > now)
-                    ? 0 : (now - FiletimeOf(fd)) / 10000ULL;
+                uint64_t aMtime = FiletimeOf(fd);
+                uint64_t ageMs = (aMtime > now) ? 0 : (now - aMtime) / 10000ULL;
                 if (ageMs >= kRecentMs) {
-                    found.push_back({ dir / name, 0 });
-                    if (found.size() >= kMaxCandidates) break;
+                    subtree.push_back({ (dir / name).wstring(), aMtime });
                 }
                 continue;   // never descend into artifacts during discovery
             }
             if (depth + 1 <= kMaxDepth && !IsPrunedDirName(name)) {
-                stack.push_back({ dir / name, depth + 1 });
+                auto deeper = walk(dir / name, depth + 1);
+                subtree.insert(subtree.end(), deeper.begin(), deeper.end());
             }
+        }
+        {
+            std::lock_guard<std::mutex> g(cacheMu);
+            dirCache[key] = DirEntryCache{ dirMtime, subtree };
+        }
+        return subtree;
+    };
+
+    for (auto& r : SearchRoots()) {
+        if (found.size() >= kMaxCandidates || visited >= kMaxDirs) break;
+        for (const auto& a : walk(r, 0)) {
+            FoundDir f{ fs::path(a.path), 0 };
+            found.push_back(std::move(f));
+            if (found.size() >= kMaxCandidates) break;
         }
     }
     if (cancel.load()) return;
+    MS_LOG_INFO(L"DevBuildCache: discovery %zu dirs (%zu cache hits), %zu artifacts",
+                visited, cachedHits, found.size());
     if (found.empty()) return;
 
     // Size the artifact dirs — the expensive part. v2.8: parallel worker
@@ -298,8 +346,6 @@ void Scan(std::vector<ScanItem>& out,
                      IsCautiousArtifactName(name) && !IsSafeArtifactName(name),
                      s.size, out);
     }
-    MS_LOG_INFO(L"DevBuildCache: %zu artifact dirs in %zu visited dirs",
-                found.size(), visited);
 }
 
 } // namespace DevBuildCache

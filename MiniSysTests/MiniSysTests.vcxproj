@@ -92,6 +92,7 @@
     <ClCompile Include="tests\DelegateOpTests.cpp" />
     <ClCompile Include="tests\DevBuildCacheTests.cpp" />
     <ClCompile Include="tests\GuardRailsAdversarialTests.cpp" />
+    <ClCompile Include="tests\PerfBenchTests.cpp" />
     <ClCompile Include="..\MiniSys\src\core\SessionService.cpp" />
     <ClCompile Include="..\MiniSys\src\core\Settings.cpp" />
     <ClCompile Include="..\MiniSys\src\core\PlanBuilder.cpp" />
@@ -104,6 +105,7 @@
     <ClCompile Include="..\MiniSys\src\core\MoveJunctionOp.cpp" />
     <ClCompile Include="..\MiniSys\src\core\OperationLog.cpp" />
     <ClCompile Include="..\MiniSys\src\core\DevBuildCache.cpp" />
+    <ClCompile Include="..\MiniSys\src\core\JunkScanner.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Junction.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\RestartManager.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\SystemRestore.cpp" />
