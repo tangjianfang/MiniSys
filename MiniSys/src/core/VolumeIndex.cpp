@@ -9,9 +9,12 @@
 #include <windows.h>
 #include <winioctl.h>
 #include <algorithm>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <share.h>
+#include <thread>
 
 namespace minisys {
 
@@ -307,6 +310,12 @@ bool VolumeIndex::BuildFull(wchar_t drive,
         DWORD serial = 0;
         ok = GetVolumeInformationW(RootPath(drive).c_str(), nullptr, 0, &serial,
                                    nullptr, nullptr, nullptr, 0);
+        if (!ok) {
+            // v2.13a: this used to fail SILENTLY — an empty search tab with
+            // zero log lines was undiagnosable.
+            MS_LOG_WARN(L"VolumeIndex: GetVolumeInformationW(%c:) failed (Win32 %lu)",
+                        drive, GetLastError());
+        }
         if (ok) volumeSerial_ = serial;
     }
 
@@ -472,8 +481,12 @@ bool VolumeIndex::BuildFull(wchar_t drive,
     return valid_;
 }
 
-// v2.6: filesystem-walk fallback (see header). Synthetic FRNs are unique
-// within the session; the journal machinery is intentionally disabled.
+// v2.6: filesystem-walk fallback (see header). v2.13a: PARALLEL directory
+// queue (6 threads) — a single-threaded walk of a multi-million-file C:
+// took 10-30 minutes of silent churning while the user watched an empty
+// search tab. Synthetic FRNs are unique within the session; the journal
+// machinery is intentionally disabled; the result is persisted (flagged)
+// so restarts are instant and idle maintenance re-walks for freshness.
 bool VolumeIndex::WalkBuild(wchar_t drive,
                             const std::function<void(const std::wstring&)>& progress,
                             const std::atomic<bool>& cancel) {
@@ -483,71 +496,145 @@ bool VolumeIndex::WalkBuild(wchar_t drive,
     journalId_ = 0;
     nextUsn_ = 0;
 
-    uint64_t nextFrn = 1;
+    uint64_t nextFrnVal = 1;
     Node root{};
-    root.frn = nextFrn;
-    root.parentFrn = nextFrn;   // self-parent → Finalize treats it as root
+    root.frn = nextFrnVal;
+    root.parentFrn = nextFrnVal;   // self-parent → Finalize treats it as root
     root.isDir = true;
     nodes_.push_back(root);
-    uint64_t rootFrn = nextFrn++;
+    uint64_t rootFrn = nextFrnVal++;
 
     struct Frame { std::wstring path; uint64_t parentFrn; };
-    std::vector<Frame> stack{ { RootPath(drive), rootFrn } };
-
-    std::vector<WIN32_FIND_DATAW> entries;
+    std::mutex qMu;                 // guards queue/active/done
+    std::condition_variable cv;
+    std::deque<Frame> queue{ { RootPath(drive), rootFrn } };
+    size_t active = 0;
+    bool done = false;
+    std::mutex appendMu;            // guards nodes_/names_/nextFrn
+    std::atomic<size_t> visited{0};
+    std::atomic<size_t> reportedLog{0};
     size_t reported = 0;
-    while (!stack.empty()) {
-        if (cancel.load()) return false;
-        Frame fr = stack.back();
-        stack.pop_back();
+    bool cancelled = false;
 
-        entries.clear();
-        std::wstring search = fr.path;
-        if (!search.empty() && search.back() != L'\\') search += L'\\';
-        search += L'*';
-        WIN32_FIND_DATAW fd{};
-        HANDLE h = FindFirstFileExW(
-            LongPath(std::filesystem::path(search)).c_str(),
-            FindExInfoBasic, &fd,
-            FindExSearchNameMatch, nullptr,
-            FIND_FIRST_EX_LARGE_FETCH);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do {
-            const wchar_t* n = fd.cFileName;
-            if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 4;
+    int n = static_cast<int>(hw);
+    if (n > 6) n = 6;
+    if (n < 2) n = 2;
 
-            Node node{};
-            node.frn       = nextFrn++;
-            node.parentFrn = fr.parentFrn;
-            node.attrs     = fd.dwFileAttributes;
-            node.lastWrite = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
-                             static_cast<uint64_t>(fd.ftLastWriteTime.dwLowDateTime);
-            node.isDir     = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            node.nameOff   = static_cast<uint32_t>(names_.size());
-            node.nameLen   = static_cast<uint32_t>(wcslen(n));
-            names_ += n;
-            uint64_t frn = node.frn;
-            bool isDir = node.isDir;
-            nodes_.push_back(std::move(node));
+    MS_LOG_INFO(L"VolumeIndex: %c: USN unusable — parallel filesystem walk (%d threads) starting",
+                drive, n);
 
-            if (isDir) {
-                stack.push_back({ fr.path + L"\\" + n, frn });
+    auto worker = [&] {
+        std::vector<WIN32_FIND_DATAW> entries;
+        for (;;) {
+            Frame fr;
+            {
+                std::unique_lock<std::mutex> lk(qMu);
+                cv.wait(lk, [&] { return !queue.empty() || done; });
+                if (queue.empty()) return;   // done
+                fr = std::move(queue.front());
+                queue.pop_front();
+                ++active;
             }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+            if (cancel.load()) {
+                std::unique_lock<std::mutex> lk(qMu);
+                --active;
+                cancelled = true;
+                done = true;
+                cv.notify_all();
+                return;
+            }
+            ++visited;
 
-        if (reported + 100000 <= nodes_.size()) {
-            reported = nodes_.size();
-            if (progress) {
-                progress(L"遍历: " + std::to_wstring(nodes_.size()) + L" 项");
+            entries.clear();
+            std::wstring search = fr.path;
+            if (!search.empty() && search.back() != L'\\') search += L'\\';
+            search += L'*';
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileExW(
+                LongPath(std::filesystem::path(search)).c_str(),
+                FindExInfoBasic, &fd,
+                FindExSearchNameMatch, nullptr,
+                FIND_FIRST_EX_LARGE_FETCH);
+
+            std::vector<std::pair<std::wstring, bool>> children;   // name, isDir
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    const wchar_t* nm = fd.cFileName;
+                    if (nm[0] == L'.' && (nm[1] == 0 || (nm[1] == L'.' && nm[2] == 0))) continue;
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                    uint64_t mtime =
+                        (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                        static_cast<uint64_t>(fd.ftLastWriteTime.dwLowDateTime);
+                    std::wstring name(nm);
+                    bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    {
+                        std::lock_guard<std::mutex> g(appendMu);
+                        Node node{};
+                        node.frn       = nextFrnVal++;
+                        node.parentFrn = fr.parentFrn;
+                        node.attrs     = fd.dwFileAttributes;
+                        node.lastWrite = mtime;
+                        node.isDir     = isDir;
+                        node.nameOff   = static_cast<uint32_t>(names_.size());
+                        node.nameLen   = static_cast<uint32_t>(name.size());
+                        names_ += name;
+                        uint64_t frn = node.frn;
+                        nodes_.push_back(std::move(node));
+                        if (isDir) children.push_back({ fr.path + L"\\" + name, frn });
+                    }
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+
+            {
+                std::unique_lock<std::mutex> lk(qMu);
+                for (auto& c : children) {
+                    queue.push_back({ std::move(c.first), c.second });
+                }
+                --active;
+                if (queue.empty() && active == 0) done = true;
+                cv.notify_all();
+            }
+
+            size_t v = visited.load();
+            if (v - reported >= 20000) {
+                reported = v;
+                size_t entriesNow = nodes_.size();
+                if (progress) {
+                    progress(L"遍历: " + std::to_wstring(entriesNow) + L" 项");
+                }
+                if (entriesNow - reportedLog.load() >= 500000) {
+                    reportedLog.store(entriesNow);
+                    MS_LOG_INFO(L"VolumeIndex: %c: walk at %zu entries (%zu dirs)",
+                                drive, entriesNow, v);
+                }
             }
         }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(n);
+    for (int t = 0; t < n; ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+
+    walkBuilt_ = !nodes_.empty() && !cancelled;
+    MS_LOG_INFO(L"VolumeIndex: %c: walk %s: %zu entries, %zu dirs",
+                drive, cancelled ? L"CANCELLED" : L"done", nodes_.size(),
+                visited.load());
+    if (walkBuilt_) {
+        SaveCacheIfWorthwhile();   // v2.13a: persist — restarts are instant
     }
-    walkBuilt_ = !nodes_.empty();
-    MS_LOG_INFO(L"VolumeIndex: walk fallback built %zu entries on %c:",
-                nodes_.size(), drive);
     return walkBuilt_;
+}
+
+// v2.13a: freshness for walk-built indexes — a full parallel re-walk
+// (minutes, idle-time) replacing the synthetic tree in one shot.
+void VolumeIndex::RefreshWalk(const std::function<void(const std::wstring&)>& progress,
+                              const std::atomic<bool>& cancel) {
+    if (!walkBuilt_) return;
+    WalkBuild(drive_, progress, cancel);
 }
 
 bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
@@ -1002,7 +1089,7 @@ size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
 
 namespace {
 constexpr uint32_t kCacheMagic   = 0x5853494D;   // "MISX"
-constexpr uint32_t kCacheVersion = 1;
+constexpr uint32_t kCacheVersion = 2;
 constexpr size_t   kMinCachedEntries = 10000;    // never persist a truncated index
 
 #pragma pack(push, 1)
@@ -1044,6 +1131,8 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
         if (fread(&cSerial, 8, 1, f) != 1) break;
         if (fread(&cJournal, 8, 1, f) != 1) break;
         if (fread(&cNextUsn, 8, 1, f) != 1) break;
+        uint8_t cWalk = 0;
+        if (fread(&cWalk, 1, 1, f) != 1) break;   // v2: walk-built flag
         if (fread(&cNodeCount, 8, 1, f) != 1) break;
         if (fread(&cNameBytes, 8, 1, f) != 1) break;
         if (cDrive != drive || cNodeCount < kMinCachedEntries ||
@@ -1092,6 +1181,7 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
         volumeSerial_ = cSerial;
         journalId_    = cJournal;
         nextUsn_      = cNextUsn;
+        walkBuilt_    = (cWalk != 0);
         Finalize();
         entryCount_.store(nodes_.size(), std::memory_order_release);
         valid_.store(true, std::memory_order_release);
@@ -1110,7 +1200,8 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
 
 void VolumeIndex::SaveCacheIfWorthwhile() const {
     if (!valid_.load(std::memory_order_acquire)) return;
-    if (walkBuilt_) return;   // walk-built indexes are session-only
+    // v2.13a: walk-built indexes ARE persisted now (flagged in the header) —
+    // restarts are instant; freshness comes from idle re-walks.
     if (nodes_.size() < kMinCachedEntries) return;   // truncated indexes stay volatile
 
     auto final = CacheFilePath(drive_);

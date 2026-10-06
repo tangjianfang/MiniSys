@@ -63,6 +63,12 @@ public:
     bool IsValid() const { return valid_.load(std::memory_order_acquire); }
     wchar_t Drive() const { return drive_; }
     size_t EntryCount() const { return entryCount_.load(std::memory_order_acquire); }
+    // v2.13a: true when this volume's index came from the filesystem-walk
+    // fallback (USN unusable) — no journal to refresh, so freshness comes
+    // from periodic re-walks (idle maintenance calls RefreshWalk).
+    bool IsWalkBuilt() const { return walkBuilt_; }
+    void RefreshWalk(const std::function<void(const std::wstring&)>& progress,
+                     const std::atomic<bool>& cancel);
 
     // Case-insensitive directory lookup by full path ("c:\windows\system32").
     bool HasDir(const std::wstring& dirPath) const;

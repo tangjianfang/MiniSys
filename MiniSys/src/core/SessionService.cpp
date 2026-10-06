@@ -406,13 +406,23 @@ bool SessionService::IdleMaintenanceAsync() {
     return StartTask(TaskKind::Verifying, [this, hwnd]() {
         // 1) journal deltas for every built volume (cheap by design —
         // EnsureBuilt revalidates serial + reads only new USN records).
+        // v2.13a: WALK-built volumes have no journal — refresh them with a
+        // parallel re-walk (minutes, but we're idle by contract).
         size_t refreshed = 0;
         for (const auto& root : EnumerateDrives()) {
             if (cancelScan_.load()) break;
             wchar_t d = ::towupper(root.empty() ? L'C' : root[0]);
             auto& vi = VolumeIndex::For(d);
             if (!vi.IsValid()) continue;
-            vi.EnsureBuilt(d, nullptr, cancelScan_);
+            if (vi.IsWalkBuilt()) {
+                SetProgress(FormatW(L"空闲维护：重扫 %c: 索引…", d));
+                Post(hwnd, WM_APP_SCAN_PROGRESS);
+                vi.RefreshWalk(
+                    [this](const std::wstring& msg) { SetProgress(msg); },
+                    cancelScan_);
+            } else {
+                vi.EnsureBuilt(d, nullptr, cancelScan_);
+            }
             ++refreshed;
         }
 
