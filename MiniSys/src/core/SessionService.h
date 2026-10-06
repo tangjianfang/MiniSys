@@ -84,6 +84,16 @@ public:
     // MutableResults escape hatch that raced RunPlan).
     void StoreResults(TabId tab, std::vector<ScanItem> items);
 
+    // v2.5 cached results: when was this tab last scanned (FILETIME ticks),
+    // and did the current list come from the on-disk cache? Per-tab — each
+    // tab's staleness is judged separately. Execution safety does not depend
+    // on freshness (planHash + per-item size/mtime re-verification).
+    uint64_t LastScanAt(TabId tab) const;
+    bool     ResultsFromCache(TabId tab) const;
+    // Load a persisted result list from %LOCALAPPDATA%\MiniSys\cache (UI
+    // startup convenience). Returns false when no usable cache exists.
+    bool TryLoadCachedResults(TabId tab);
+
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
 
@@ -110,9 +120,10 @@ private:
     void RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd);
     void RunPlan(const CleanPlan plan, HWND hwnd);
     void RunEmptyQuarantine(HWND hwnd);
+    void SaveResultsCache(TabId tab);   // v2.5 persisted scan results
 
     void SetProgress(const std::wstring& text);
-    void Post(HWND hwnd, UINT msg, WPARAM wp = 0);
+    void Post(HWND hwnd, UINT msg, WPARAM wp = 0, LPARAM lp = 0);
     static std::wstring FormatCountSimple(size_t n);   // "1,234,567"
 
     HWND hwnd_ = nullptr;
@@ -123,6 +134,15 @@ private:
     std::wstring progressText_;
     mutable std::mutex resultsMu_;          // REVIEW P1-1
     std::vector<std::vector<ScanItem>> results_;   // indexed by TabId
+    // v2.5 cache metadata (guarded by resultsMu_ alongside results_).
+    uint64_t scanAt_[static_cast<size_t>(TabId::Count)] = {};
+    bool     fromCache_[static_cast<size_t>(TabId::Count)] = {};
+
+    // v2.5 (U-5): quarantine usage text is recomputed only when the
+    // operation log generation changes, not on every progress tick.
+    mutable std::mutex qCacheMu_;
+    mutable uint64_t    qCacheGen_ = 0;
+    mutable std::wstring qCacheText_;
 
     mutable std::mutex reportMu_;
     ExecuteReport lastReport_;

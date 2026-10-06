@@ -70,6 +70,10 @@ private:
     TaskMode taskMode_ = TaskMode::None;
     Settings settings_;                       // REVIEW P2: persisted state
     std::wstring tabInfoText_;                // REVIEW-UI P1 (L-3): static per-tab description
+    bool progDeterminate_ = false;            // v2.5 (L-13): bar mode flag
+    bool scanIconIsStop_ = false;             // v2.5 (L-22): cancel-state icon
+    void OnIdleCheck();                       // v2.5: idle background rescan
+    std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
 };
 
 } // namespace minisys

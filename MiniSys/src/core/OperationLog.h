@@ -34,6 +34,11 @@ public:
     // Load all records (newest first). Reads JSONL and legacy TSV lines.
     std::vector<OpRecord> LoadAll();
 
+    // v2.5 (U-5): monotonic change counter — bumped on every write. Lets
+    // callers (status bar quarantine usage) cache derived data and
+    // invalidate precisely instead of re-parsing per tick.
+    uint64_t Generation();
+
     // Generate a unique record id (timestamp + counter).
     static std::wstring NewId();
 
@@ -46,6 +51,7 @@ public:
 private:
     OperationLog() = default;
     std::mutex mu_;
+    uint64_t gen_ = 1;   // bumped on every write (cache invalidation, v2.5)
 
     std::vector<OpRecord> LoadAllLocked();   // caller holds mu_
 

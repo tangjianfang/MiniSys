@@ -63,16 +63,27 @@ public:
     // Query syntax: whitespace-separated terms, ALL must match (AND);
     // case-insensitive; '*'/'?' wildcards per term; when `matchPath` is set
     // a term may match anywhere in the full path instead of just the name.
-    // Emits up to maxResults hits in name-ascending order; `sink` returning
-    // false stops early. Returns the number of hits emitted.
+    // v2.5 Everything-style in-query filters (matched during the scan, so
+    // they never consume result slots): "folder:" / "is:folder" restricts to
+    // directories, "file:" / "is:file" to files, "ext:cpp;h" to extensions.
     struct SearchHit {
         std::wstring name;      // original-case file name
         std::wstring path;      // original-case full path
         uint64_t     lastWrite = 0;
         bool         isDirectory = false;
     };
+    struct SearchFilter {
+        bool filesOnly = false;
+        bool dirsOnly = false;
+        std::vector<std::wstring> exts;   // lowercase, no leading dot
+    };
+    // Splits filter tokens out of `query`; the remaining free-text terms are
+    // re-joined (space separated) into `freeQuery`.
+    static SearchFilter ParseFilterTerms(const std::wstring& query,
+                                         std::wstring& freeQuery);
     size_t Search(const std::wstring& query, bool matchPath, size_t maxResults,
-                  const std::function<bool(const SearchHit&)>& sink) const;
+                  const std::function<bool(const SearchHit&)>& sink,
+                  const SearchFilter& filter = {}) const;
 
     // ---- test seams (unit tests build synthetic indexes) ----
     void ResetForTesting();
@@ -110,6 +121,13 @@ private:
     bool BuildFull(wchar_t drive,
                    const std::function<void(const std::wstring&)>& progress,
                    const std::atomic<bool>& cancel);
+
+    // v2.5 disk cache (%LOCALAPPDATA%\MiniSys\index-cache.bin): avoids the
+    // ~30 s MFT walk on every start. Accuracy comes from RefreshFromUsn —
+    // the journal delta is applied after loading, so a stale cache self-
+    // heals (and a mismatched volume serial forces a rebuild).
+    bool TryLoadCache(wchar_t drive);
+    void SaveCacheIfWorthwhile() const;
     // Read the USN journal since nextUsn_ and apply the deltas. Returns false
     // when a full rebuild is the better option (journal reset / huge delta).
     bool RefreshFromUsn(const std::atomic<bool>& cancel);

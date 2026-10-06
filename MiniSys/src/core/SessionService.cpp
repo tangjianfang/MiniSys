@@ -9,6 +9,7 @@
 #include "core/VolumeIndex.h"
 #include "platform/SystemRestore.h"
 #include "res/resource.h"
+#include "util/Json.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
@@ -16,8 +17,11 @@
 #include <windows.h>
 #include <objbase.h>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 
 namespace fs = std::filesystem;
 
@@ -41,8 +45,8 @@ void SessionService::SetProgress(const std::wstring& text) {
     progressText_ = text;
 }
 
-void SessionService::Post(HWND hwnd, UINT msg, WPARAM wp) {
-    if (hwnd) PostMessageW(hwnd, msg, wp, 0);
+void SessionService::Post(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (hwnd) PostMessageW(hwnd, msg, wp, lp);
 }
 
 std::wstring SessionService::ProgressText() const {
@@ -65,6 +69,159 @@ std::vector<ScanItem> SessionService::Results(TabId tab) const {
 void SessionService::StoreResults(TabId tab, std::vector<ScanItem> items) {
     std::lock_guard<std::mutex> g(resultsMu_);
     results_[static_cast<size_t>(tab)] = std::move(items);
+}
+
+// ---- v2.5: persisted scan results -------------------------------------------
+
+namespace {
+
+// %LOCALAPPDATA%\MiniSys\cache\results-<tab>.json — one file per scan tab so
+// each tab's staleness is judged (and refreshed) separately. Capped at
+// kMaxCachedItems rows to bound the file size.
+constexpr size_t kMaxCachedItems = 5000;
+
+std::filesystem::path ResultsCachePath(TabId tab) {
+    return std::filesystem::path(AppDataDir()) / L"cache" /
+           (L"results-" + std::to_wstring(static_cast<int>(tab)) + L".json");
+}
+
+Json ScanItemToJson(const ScanItem& it) {
+    Json j = Json::Object();
+    j.Set(L"category", Json(it.category));
+    j.Set(L"title", Json(it.title));
+    j.Set(L"path", Json(it.path.wstring()));
+    j.Set(L"sizeBytes", Json(static_cast<double>(it.sizeBytes)));
+    j.Set(L"createTime", Json(static_cast<double>(it.createTime)));
+    j.Set(L"detail", Json(it.detail));
+    j.Set(L"recommended", Json(it.recommended));
+    j.Set(L"dangerous", Json(it.dangerous));
+    j.Set(L"groupKey", Json(it.groupKey));
+    j.Set(L"ruleId", Json(it.ruleId));
+    j.Set(L"lastWriteFiletime", Json(static_cast<double>(it.lastWriteFiletime)));
+    j.Set(L"riskLevel", Json(static_cast<double>(
+        static_cast<int>(it.riskLevel))));
+    j.Set(L"strategy", Json(static_cast<double>(
+        static_cast<int>(it.strategy))));
+    j.Set(L"command", Json(it.command));
+    return j;
+}
+
+bool JsonToScanItem(const Json& j, ScanItem& it) {
+    if (!j.IsObject()) return false;
+    it.category = j.Get(L"category").AsString();
+    it.title    = j.Get(L"title").AsString();
+    it.path     = j.Get(L"path").AsString();
+    it.sizeBytes   = static_cast<unsigned long long>(
+        j.Get(L"sizeBytes").AsNumber());
+    it.createTime  = static_cast<uint64_t>(j.Get(L"createTime").AsNumber());
+    it.detail      = j.Get(L"detail").AsString();
+    it.recommended = j.Get(L"recommended").AsBool(true);
+    it.dangerous   = j.Get(L"dangerous").AsBool(false);
+    it.groupKey    = j.Get(L"groupKey").AsString();
+    it.ruleId      = j.Get(L"ruleId").AsString();
+    it.lastWriteFiletime = static_cast<uint64_t>(
+        j.Get(L"lastWriteFiletime").AsNumber());
+    int risk = static_cast<int>(j.Get(L"riskLevel").AsNumber(1));
+    if (risk < 0 || risk > 3) return false;
+    it.riskLevel = static_cast<RiskLevel>(risk);
+    int strat = static_cast<int>(j.Get(L"strategy").AsNumber(0));
+    if (strat < 0 || strat > 2) return false;
+    it.strategy = static_cast<CleanStrategy>(strat);
+    it.command  = j.Get(L"command").AsString();
+    return !it.path.empty();
+}
+
+} // namespace
+
+void SessionService::SaveResultsCache(TabId tab) {
+    if (tab == TabId::History || tab == TabId::Search) return;   // derived data
+    std::vector<ScanItem> items;
+    uint64_t scanAt = 0;
+    {
+        std::lock_guard<std::mutex> g(resultsMu_);
+        items  = results_[static_cast<size_t>(tab)];
+        scanAt = scanAt_[static_cast<size_t>(tab)];
+    }
+    if (items.empty() || scanAt == 0) return;
+    if (items.size() > kMaxCachedItems) items.resize(kMaxCachedItems);
+
+    try {
+        auto path = ResultsCachePath(tab);
+        std::filesystem::create_directories(path.parent_path());
+        Json root = Json::Object();
+        root.Set(L"tab", Json(static_cast<double>(static_cast<int>(tab))));
+        root.Set(L"scanAt", Json(static_cast<double>(scanAt)));
+        Json arr = Json::Array();
+        for (const auto& it : items) arr.Push(ScanItemToJson(it));
+        root.Set(L"items", arr);
+
+        auto tmp = path;
+        tmp += L".tmp";
+        {
+            std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+            if (!f) return;
+            f << WideToUtf8(root.Dump());
+        }
+        MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    } catch (const std::exception& ex) {
+        MS_LOG_WARN(L"Results cache save failed (tab %d): %hs",
+                    static_cast<int>(tab), ex.what());
+    }
+}
+
+uint64_t SessionService::LastScanAt(TabId tab) const {
+    std::lock_guard<std::mutex> g(resultsMu_);
+    return scanAt_[static_cast<size_t>(tab)];
+}
+
+bool SessionService::ResultsFromCache(TabId tab) const {
+    std::lock_guard<std::mutex> g(resultsMu_);
+    return fromCache_[static_cast<size_t>(tab)];
+}
+
+bool SessionService::TryLoadCachedResults(TabId tab) {
+    if (tab == TabId::History || tab == TabId::Search) return false;
+    {
+        std::lock_guard<std::mutex> g(resultsMu_);
+        if (!results_[static_cast<size_t>(tab)].empty()) return false;  // fresh data wins
+    }
+    try {
+        auto path = ResultsCachePath(tab);
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) return false;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        std::string utf8((std::istreambuf_iterator<char>(f)), {});
+        Json j;
+        std::wstring err;
+        if (!Json::Parse(Utf8ToWide(utf8), j, err) || !j.IsObject()) {
+            MS_LOG_WARN(L"Results cache parse failed (tab %d): %s",
+                        static_cast<int>(tab), err.c_str());
+            return false;
+        }
+        std::vector<ScanItem> items;
+        const Json& arr = j.Get(L"items");
+        if (arr.IsArray()) {
+            items.reserve(arr.Size());
+            for (size_t i = 0; i < arr.Size(); ++i) {
+                ScanItem it;
+                if (JsonToScanItem(arr.At(i), it)) items.push_back(std::move(it));
+            }
+        }
+        if (items.empty()) return false;
+        uint64_t scanAt = static_cast<uint64_t>(j.Get(L"scanAt").AsNumber());
+
+        std::lock_guard<std::mutex> g(resultsMu_);
+        if (!results_[static_cast<size_t>(tab)].empty()) return false;
+        results_[static_cast<size_t>(tab)]    = std::move(items);
+        scanAt_[static_cast<size_t>(tab)]     = scanAt;
+        fromCache_[static_cast<size_t>(tab)]  = true;
+        return true;
+    } catch (const std::exception& ex) {
+        MS_LOG_WARN(L"Results cache load failed (tab %d): %hs",
+                    static_cast<int>(tab), ex.what());
+        return false;
+    }
 }
 
 bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
@@ -168,10 +325,14 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
         std::vector<ScanItem> items;
         auto& vi = VolumeIndex::Instance();
         if (!query.empty()) {
+            // v2.5: Everything-style in-query filters ("folder:", "file:",
+            // "ext:cpp;h") are matched inside the index scan.
+            std::wstring freeQuery;
+            auto filter = VolumeIndex::ParseFilterTerms(query, freeQuery);
             constexpr size_t kMaxResults = 1000;
             constexpr size_t kSizeFetchRows = 150;
             items.reserve(256);
-            vi.Search(query, matchPath, kMaxResults,
+            vi.Search(freeQuery, matchPath, kMaxResults,
                 [&](const VolumeIndex::SearchHit& hit) {
                     ScanItem it;
                     std::filesystem::path p(hit.path);
@@ -186,7 +347,8 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
                     it.riskLevel   = RiskLevel::Cautious;   // unclassified
                     items.push_back(std::move(it));
                     return !cancelScan_.load();   // stop on new keystroke
-                });
+                },
+                filter);
             // Lazy size fetch for the top rows (ADR-004: the index carries
             // no sizes). Cancellation checked per row.
             WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -217,9 +379,16 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
     auto t0 = std::chrono::steady_clock::now();
     try {
         scanner->Scan(buffer,
-            [this, hwnd](unsigned long long, unsigned long long, const std::wstring& msg) {
-                SetProgress(L"扫描: " + msg);
-                Post(hwnd, WM_APP_SCAN_PROGRESS);
+            [this, hwnd](unsigned long long done, unsigned long long total,
+                         const std::wstring& msg) {
+                // REVIEW-UI P2 (L-13): when a scanner phase knows its
+                // done/total, the progress bar switches from marquee to a
+                // determinate percentage (wp=done, lp=total).
+                SetProgress(total
+                    ? FormatW(L"扫描 %llu/%llu: %s", done, total, msg.c_str())
+                    : L"扫描: " + msg);
+                Post(hwnd, WM_APP_SCAN_PROGRESS,
+                     static_cast<WPARAM>(done), static_cast<LPARAM>(total));
             },
             cancelScan_);
     } catch (const std::exception& ex) {
@@ -232,6 +401,11 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
     {
         std::lock_guard<std::mutex> g(resultsMu_);   // REVIEW P1-1
         results_[static_cast<size_t>(tab)] = std::move(buffer);
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        scanAt_[static_cast<size_t>(tab)] =
+            (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        fromCache_[static_cast<size_t>(tab)] = false;
         // M4: benchmark record (perf numbers come from the log).
         MS_LOG_INFO(L"Scan tab=%d done: %zu items in %lld ms",
                     static_cast<int>(tab),
@@ -239,6 +413,9 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
                     static_cast<long long>(ms));
         SetProgress(FormatW(L"扫描完成: %zu 项",
                             results_[static_cast<size_t>(tab)].size()));
+    }
+    if (!cancelScan_.load()) {
+        SaveResultsCache(tab);   // v2.5: persist for the next session
     }
     Post(hwnd, WM_APP_SCAN_DONE);
 }
@@ -461,6 +638,14 @@ void SessionService::RunEmptyQuarantine(HWND hwnd) {
 }
 
 std::wstring SessionService::QuarantineUsageText() const {
+    // REVIEW-UI P2 (U-5): this runs on every status-bar tick (progress
+    // updates fire several times a second) — recompute only when the
+    // operation log generation changed, not by re-parsing history.jsonl.
+    uint64_t gen = OperationLog::Instance().Generation();
+    {
+        std::lock_guard<std::mutex> g(qCacheMu_);
+        if (gen == qCacheGen_) return qCacheText_;
+    }
     // REVIEW P1-7 (03-B7): purged records used to keep counting — the bar
     // never returned to zero after "清空隔离区".
     unsigned long long bytes = 0;
@@ -471,9 +656,17 @@ std::wstring SessionService::QuarantineUsageText() const {
         ++count;
         bytes += r.sizeBytes;
     }
-    if (count == 0) return {};
-    return FormatW(L"隔离区: %llu 项 / %s (清空后释放)", count,
-                   FormatSize(bytes).c_str());
+    std::wstring text;
+    if (count != 0) {
+        text = FormatW(L"隔离区: %llu 项 / %s (清空后释放)", count,
+                       FormatSize(bytes).c_str());
+    }
+    {
+        std::lock_guard<std::mutex> g(qCacheMu_);
+        qCacheGen_  = gen;
+        qCacheText_ = text;
+    }
+    return text;
 }
 
 bool SessionService::UndoRecordsAsync(const std::vector<OpRecord>& records) {

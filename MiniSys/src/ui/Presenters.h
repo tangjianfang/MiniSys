@@ -76,7 +76,10 @@ public:
 
 protected:
     UiHandles ui_;
-    int  sortCol_ = -1;    // -1 none, 0 size, 1 time
+    // REVIEW-UI P2 (L-10): sortCol_ now stores the actual COLUMN index
+    // (0 分类 / 1 风险 / 2 项目 / 3 大小 / 4 详情→时间); the header shows a
+    // direction arrow for the active column.
+    int  sortCol_ = -1;
     bool sortAsc_ = false; // false = descending
     std::vector<ScanItem> snapshot_;   // UI-private copy (REVIEW P1-1)
     // REVIEW-UI P0 (L-1): full per-path check state (true AND false) —

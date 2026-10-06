@@ -1,5 +1,6 @@
 #include "core/JunkScanner.h"
 
+#include "core/DevBuildCache.h"
 #include "core/JunkRules.h"
 #include "core/VolumeIndex.h"
 #include "util/Logger.h"
@@ -363,7 +364,14 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
         out.push_back(std::move(it));
     }
 
-    // ---- 4. Recycle bin (special item; executed via EmptyRecycleOp) ----
+    // ---- 4. Dev build caches (v2.5): VS/C++/CMake artifacts next to a
+    // project marker — quarantined like everything else, and dirs touched
+    // in the last 24 h are skipped so active builds stay untouched. ----
+    if (!cancel.load()) {
+        DevBuildCache::Scan(out, progress, cancel);
+    }
+
+    // ---- 5. Recycle bin (special item; executed via EmptyRecycleOp) ----
     if (!cancel.load()) {
         if (progress) progress(0, 0, L"Recycle Bin");
         RecycleBinInfo info;

@@ -10,17 +10,31 @@ namespace {
 // never scaled — at 150% the buttons stayed 30 px and icons 16 px. All
 // layout metrics scale with the window DPI now.
 int Scale(int v, UINT dpi) { return v * static_cast<int>(dpi) / 96; }
+
+UINT WindowDpi(HWND hwnd) {
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        if (hwnd) {
+            using Fn = UINT(WINAPI*)(HWND);
+            if (auto fn = reinterpret_cast<Fn>(GetProcAddress(user32, "GetDpiForWindow"))) {
+                return fn(hwnd);
+            }
+        } else {
+            // No window yet (initial CreateWindow size) — system DPI.
+            using FnS = UINT(WINAPI*)();
+            if (auto fn = reinterpret_cast<FnS>(GetProcAddress(user32, "GetDpiForSystem"))) {
+                return fn();
+            }
+        }
+    }
+    return 96;
 }
+} // namespace
+
+int UiScale(HWND hwnd, int v) { return Scale(v, WindowDpi(hwnd)); }
 
 void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
                   bool showSearch) {
-    UINT dpi = 96;
-    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
-        using Fn = UINT(WINAPI*)(HWND);
-        if (auto fn = reinterpret_cast<Fn>(GetProcAddress(user32, "GetDpiForWindow"))) {
-            dpi = fn(ui.main);
-        }
-    }
+    UINT dpi = WindowDpi(ui.main);
 
     SendMessageW(ui.status, WM_SIZE, 0, 0);
     RECT srect; GetClientRect(ui.status, &srect);
@@ -91,19 +105,21 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     }
 
     int infoY = btnY + btnH + pad + settingsRowH;
-    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, Scale(52, dpi), SWP_NOZORDER);
+    // REVIEW-UI 2026-10-06 live test: the list used to start at
+    // infoY + Scale(40) while the info label is Scale(52) tall — the label
+    // (higher in z-order) covered the top half of the column headers.
+    // The list now starts strictly BELOW the info label.
+    int infoH = Scale(52, dpi);
+    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, infoH, SWP_NOZORDER);
 
-    int contentY = infoY + Scale(40, dpi);
+    int contentY = infoY + infoH + Scale(4, dpi);
     int contentH = H - contentY - statusH - pad;   // REVIEW-UI P1 (L-4b/X-16)
     SetWindowPos(ui.list, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
     SetWindowPos(ui.tree, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
 
-    // v2.2 (REVIEW P0-5 / 07-X8): the old position (y = H + 2) placed the
-    // bar BELOW the client area — the progress bar has never been visible
-    // since v1. Sit it just above the status bar instead.
-    int prgW = Scale(220, dpi), prgH = statusH - 4;
-    SetWindowPos(ui.progress, nullptr, W - prgW - 4,
-                 H - statusH - prgH - 4, prgW, prgH, SWP_NOZORDER);
+    // v2.5: the progress bar no longer floats over the list's bottom-right
+    // corner (it covered the horizontal scrollbar) — UpdateStatusBar now
+    // positions it as an overlay on a dedicated 4th status pane.
 }
 
 } // namespace minisys

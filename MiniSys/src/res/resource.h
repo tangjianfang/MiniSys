@@ -41,6 +41,7 @@
 #define IDC_CHK_MATCHPATH           2023
 #define TIMER_SEARCH_DEBOUNCE       2
 #define TIMER_SEARCH_RETRY          3     // retry while a previous search drains
+#define TIMER_IDLE_REFRESH          4     // v2.5: idle-time background rescan
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)
 // Context menu on the list (REVIEW P2)

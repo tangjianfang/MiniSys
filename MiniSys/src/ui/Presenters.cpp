@@ -10,6 +10,8 @@
 #include "core/SessionService.h"
 #include "core/VolumeIndex.h"
 #include "res/resource.h"
+#include "ui/Dialogs.h"
+#include "ui/Layout.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
 
@@ -28,6 +30,10 @@ namespace {
 void SetListColumns(HWND list,
                     const std::vector<std::pair<const wchar_t*, int>>& cols);
 std::wstring LocalizeCategory(const std::wstring& c);
+// REVIEW-UI P2 (L-10): header sort arrows; col < 0 clears all of them.
+void UpdateHeaderSortArrows(HWND list, int col, bool asc);
+// REVIEW-UI P2 (L-11): list cells are single-line — fold "\n" into " · ".
+std::wstring OneLine(const std::wstring& s);
 } // namespace
 
 // =====================================================================
@@ -41,6 +47,7 @@ void ListTabPresenter::OnActivate() {
     // v1 reset the shared sort state on every tab change.
     sortCol_ = -1;
     sortAsc_ = false;
+    UpdateHeaderSortArrows(ui_.list, -1, false);
 }
 
 void ListTabPresenter::Refresh() {
@@ -77,9 +84,10 @@ const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
 
 void ListTabPresenter::RenderItems() {
     // REVIEW-UI P0 (L-2): scan tabs get their column headers restored
-    // (HistoryPresenter sets its own layout).
+    // (HistoryPresenter sets its own layout). v2.5: widths are DPI-scaled
+    // (L-12) and the risk column fits "⚠ 系统组件" (L-14).
     SetListColumns(ui_.list, {
-        { L"分类", 180 }, { L"风险", 84 }, { L"项目", 330 },
+        { L"分类", 180 }, { L"风险", 110 }, { L"项目", 330 },
         { L"大小", 100 }, { L"详情", 320 },
     });
 
@@ -101,7 +109,9 @@ void ListTabPresenter::RenderItems() {
         ListView_SetItemText(ui_.list, row, 2, const_cast<LPWSTR>(it.title.c_str()));
         std::wstring sz = it.sizeBytes ? FormatSize(it.sizeBytes) : std::wstring(L"—");
         ListView_SetItemText(ui_.list, row, 3, sz.data());
-        ListView_SetItemText(ui_.list, row, 4, const_cast<LPWSTR>(it.detail.c_str()));
+        // REVIEW-UI P2 (L-11): one line per cell (LABELTIP shows the rest).
+        std::wstring detail = OneLine(it.detail);
+        ListView_SetItemText(ui_.list, row, 4, detail.data());
         // REVIEW-UI P0 (L-1): full per-path check state — an explicit
         // UNCHECK of a recommended item is preserved as false.
         auto known = checkStateByPath_.find(ToLower(it.path.wstring()));
@@ -115,17 +125,54 @@ void ListTabPresenter::RenderItems() {
 namespace {
 
 // REVIEW-UI P0 (L-2): shared column header/width switcher (free function —
-// used by both the scan-tab presenters and HistoryPresenter).
+// used by both the scan-tab presenters and HistoryPresenter). v2.5: widths
+// DPI-scaled (L-12); the format is reset so sort arrows from another tab's
+// header never survive the switch.
 void SetListColumns(HWND list,
                     const std::vector<std::pair<const wchar_t*, int>>& cols) {
     for (size_t i = 0; i < cols.size(); ++i) {
         LVCOLUMNW col{};
-        col.mask = LVCF_TEXT | LVCF_WIDTH;
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+        col.fmt = LVCFMT_LEFT;
         col.pszText = const_cast<LPWSTR>(cols[i].first);
-        col.cx = cols[i].second;
+        col.cx = UiScale(list, cols[i].second);
         SendMessageW(list, LVM_SETCOLUMNW, static_cast<WPARAM>(i),
                      reinterpret_cast<LPARAM>(&col));
     }
+}
+
+// REVIEW-UI P2 (L-10): classic header arrows (HDF_SORTUP / HDF_SORTDOWN).
+void UpdateHeaderSortArrows(HWND list, int col, bool asc) {
+    HWND hd = ListView_GetHeader(list);
+    if (!hd) return;
+    int n = Header_GetItemCount(hd);
+    for (int i = 0; i < n; ++i) {
+        HDITEMW hdi{};
+        hdi.mask = HDI_FORMAT;
+        if (Header_GetItem(hd, i, &hdi)) {
+            hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+            if (i == col) hdi.fmt |= asc ? HDF_SORTUP : HDF_SORTDOWN;
+            Header_SetItem(hd, i, &hdi);
+        }
+    }
+}
+
+// REVIEW-UI P2 (L-11): the detail text carries "\n" separators (path +
+// hint); a list cell shows them as unprintable boxes — fold to one line.
+std::wstring OneLine(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t ch : s) {
+        if (ch == L'\n' || ch == L'\r') {
+            if (!out.empty() && out.back() != L' ' &&
+                out.back() != L'·') {
+                out += L" · ";
+            }
+        } else {
+            out += ch;
+        }
+    }
+    return out;
 }
 
 // REVIEW-UI P1 (L-8): display-layer localization for the English category
@@ -136,6 +183,7 @@ std::wstring LocalizeCategory(const std::wstring& c) {
         { L"Browser Cache", L"浏览器缓存" }, { L"Dev Cache", L"开发缓存" },
         { L"Windows Update", L"Windows 更新" }, { L"Windows Logs", L"系统日志" },
         { L"Chat Files", L"聊天文件" },   { L"System Component", L"系统组件" },
+        { L"Dev Build", L"开发构建缓存" },
         { L"System Reserved", L"系统保留" }, { L"Recycle Bin", L"回收站" },
         { L"App", L"应用程序" },          { L"Image", L"图片" },
         { L"Video", L"视频" },            { L"Audio", L"音频" },
@@ -157,18 +205,21 @@ std::wstring LocalizeCategory(const std::wstring& c) {
 // v2.2 (REVIEW P0-6): risk badge text for column 1. Rule-less items
 // (large files / apps / folder tree) are honestly marked unclassified
 // instead of guessed at.
+// REVIEW-UI P2 (L-14): U+FE0F (emoji presentation selector) is appended to
+// the pictographic marks — without it 🛡/⚠ can render as a monochrome box
+// depending on the installed font set.
 std::wstring ListTabPresenter::RiskBadge(const ScanItem& it) {
     // REVIEW-UI P1 (L-7): search results are unclassified by design — say so
     // instead of the meaningless "—".
     if (tab_ == TabId::Search) {
-        return it.path == L"$RECYCLE.BIN" ? L"⚠ 不可逆" : L"ℹ 未评估";
+        return it.path == L"$RECYCLE.BIN" ? L"⚠️ 不可逆" : L"ℹ️ 未评估";
     }
     if (it.ruleId.empty() && it.path != L"$RECYCLE.BIN") return L"—";
-    if (it.path == L"$RECYCLE.BIN") return L"⚠ 不可逆";
+    if (it.path == L"$RECYCLE.BIN") return L"⚠️ 不可逆";
     switch (it.riskLevel) {
-        case RiskLevel::Safe:      return L"🛡 安全";
-        case RiskLevel::Cautious:  return L"ℹ 谨慎";
-        case RiskLevel::Advanced:  return L"⚠ 系统组件";
+        case RiskLevel::Safe:      return L"🛡️ 安全";
+        case RiskLevel::Cautious:  return L"ℹ️ 谨慎";
+        case RiskLevel::Advanced:  return L"⚠️ 系统组件";
         case RiskLevel::InfoOnly:  return L"⊘ 仅提示";
     }
     return L"—";
@@ -188,23 +239,25 @@ std::vector<size_t> ListTabPresenter::CollectChecked() const {
 }
 
 void ListTabPresenter::SortBySize() {
-    if (sortCol_ == 0) sortAsc_ = !sortAsc_;
-    else { sortCol_ = 0; sortAsc_ = false; }
+    // Column 3 = 大小 (REVIEW-UI P2 L-10: sortCol_ is the column index now).
+    if (sortCol_ == 3) sortAsc_ = !sortAsc_;
+    else { sortCol_ = 3; sortAsc_ = false; }
     ApplySortAndRefresh();
 }
 
 void ListTabPresenter::SortByTime() {
-    if (sortCol_ == 1) sortAsc_ = !sortAsc_;
-    else { sortCol_ = 1; sortAsc_ = false; }
+    // Column 4 = 详情 column, sorted by the item's time (the timestamp is
+    // shown in the tooltip / 说明 panel).
+    if (sortCol_ == 4) sortAsc_ = !sortAsc_;
+    else { sortCol_ = 4; sortAsc_ = false; }
     ApplySortAndRefresh();
 }
 
 void ListTabPresenter::OnColumnClick(int col) {
-    // v2.2 columns: 0 分类, 1 风险, 2 项目, 3 大小, 4 详情 — only column 3
-    // (size) sorts by size; everything else sorts by time.
-    int sortKey = (col == 3) ? 0 : 1;
-    if (sortCol_ == sortKey) sortAsc_ = !sortAsc_;
-    else { sortCol_ = sortKey; sortAsc_ = false; }
+    // REVIEW-UI P2 (L-10): every column now sorts by what its header says
+    // (分类 / 风险 / 项目 / 大小 / 时间) instead of funnelling into size-or-time.
+    if (sortCol_ == col) sortAsc_ = !sortAsc_;
+    else { sortCol_ = col; sortAsc_ = false; }
     ApplySortAndRefresh();
 }
 
@@ -216,19 +269,48 @@ void ListTabPresenter::ApplySortAndRefresh() {
     if (items.empty()) return;
 
     bool asc = sortAsc_;
-    if (sortCol_ == 0) {
-        std::stable_sort(items.begin(), items.end(),
-            [asc](const ScanItem& a, const ScanItem& b) {
-                return asc ? (a.sizeBytes < b.sizeBytes) : (a.sizeBytes > b.sizeBytes);
-            });
-    } else if (sortCol_ == 1) {
-        std::stable_sort(items.begin(), items.end(),
-            [asc](const ScanItem& a, const ScanItem& b) {
-                return asc ? (a.createTime < b.createTime)
-                           : (a.createTime > b.createTime);
-            });
+    switch (sortCol_) {
+        case 0:   // 分类 (then 项目 for stable groups)
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    int c = ToLower(a.category).compare(ToLower(b.category));
+                    if (c != 0) return asc ? (c < 0) : (c > 0);
+                    return asc ? (ToLower(a.title) < ToLower(b.title))
+                               : (ToLower(a.title) > ToLower(b.title));
+                });
+            break;
+        case 1:   // 风险 (severity order)
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (a.riskLevel < b.riskLevel)
+                               : (a.riskLevel > b.riskLevel);
+                });
+            break;
+        case 2:   // 项目 (case-insensitive)
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (ToLower(a.title) < ToLower(b.title))
+                               : (ToLower(a.title) > ToLower(b.title));
+                });
+            break;
+        case 3:   // 大小
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (a.sizeBytes < b.sizeBytes) : (a.sizeBytes > b.sizeBytes);
+                });
+            break;
+        case 4:   // 时间 (last write)
+            std::stable_sort(items.begin(), items.end(),
+                [asc](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (a.createTime < b.createTime)
+                               : (a.createTime > b.createTime);
+                });
+            break;
+        default:
+            break;
     }
     RenderItems();
+    UpdateHeaderSortArrows(ui_.list, sortCol_, sortAsc_);
 }
 
 // =====================================================================
@@ -508,10 +590,13 @@ bool FolderTreePresenter::OnContextMenu() {
     if (cmd == IDM_CTX_DELETE) {
         // REVIEW P0-6: destructive confirmation defaults to CANCEL; wording
         // matches the actual operation (07-X13: "删除" was misleading).
-        std::wstring msg = FormatW(L"确定要将文件夹移入隔离区吗？\n%s\n\n可在“操作历史”中一键还原。",
-            folderPath.wstring().c_str());
-        if (MessageBoxW(ui_.main, msg.c_str(), L"移入隔离区",
-                MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING) != IDOK) return false;
+        // REVIEW-UI P2 (L-9): unified TaskDialog confirm (default CANCEL).
+        if (!dialogs::ConfirmTask(ui_.main, L"移入隔离区",
+                L"确定要将文件夹移入隔离区吗？",
+                folderPath.wstring() + L"\n\n可在“操作历史”中一键还原。",
+                /*warning=*/true, L"移入隔离区")) {
+            return false;
+        }
 
         auto ftItems = svc_.Results(TabId::FolderTree);   // copy (P1-1)
         size_t idx = static_cast<size_t>(-1);
@@ -574,7 +659,9 @@ void HistoryPresenter::Refresh() {
         std::wstring detail = r.source;
         if (!r.target.empty()) detail += L"  →  " + r.target;
         if (!r.note.empty())   detail += L"  | " + r.note;
-        ListView_SetItemText(ui_.list, row, 3, const_cast<LPWSTR>(detail.c_str()));
+        // REVIEW-UI P2 (L-11): notes can be multi-line — one line per cell.
+        detail = OneLine(detail);
+        ListView_SetItemText(ui_.list, row, 3, detail.data());
         std::wstring risk = HistoryRiskLabel(r);
         ListView_SetItemText(ui_.list, row, 4, risk.data());
     }

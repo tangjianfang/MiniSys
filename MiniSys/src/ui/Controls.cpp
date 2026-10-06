@@ -1,5 +1,6 @@
 #include "ui/Controls.h"
 #include "res/resource.h"
+#include "ui/Layout.h"
 
 #include <commctrl.h>
 #include <initializer_list>
@@ -17,19 +18,23 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_LISTVIEW), inst, nullptr);
+    // REVIEW-UI P2 (L-11): LABELTIP — truncated cells (the detail column's
+    // long paths) get a full-text tooltip instead of a silent clip.
     ListView_SetExtendedListViewStyle(h.list,
-        LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
+        LVS_EX_LABELTIP | LVS_EX_INFOTIP);
 
     LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
     col.fmt = LVCFMT_LEFT;
     auto AddCol = [&](int idx, int width, const wchar_t* title) {
-        col.cx = width; col.pszText = const_cast<LPWSTR>(title);
+        col.cx = UiScale(parent, width); col.pszText = const_cast<LPWSTR>(title);
         ListView_InsertColumn(h.list, idx, &col);
     };
     // v2.2 (REVIEW P0-6 / 07-X2): dedicated risk column — the risk level
-    // data existed but was never rendered.
+    // data existed but was never rendered. v2.5: widths are DPI-scaled
+    // (L-12) and the risk column is wide enough for "⚠ 系统组件" (L-14).
     AddCol(0, 180, L"分类");
-    AddCol(1, 84, L"风险");
+    AddCol(1, 110, L"风险");
     AddCol(2, 330, L"项目");
     AddCol(3, 100, L"大小");
     AddCol(4, 320, L"详情");
@@ -102,6 +107,11 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.chkMatchPath = CreateWindowExW(0, L"BUTTON", L"匹配完整路径",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_MATCHPATH), inst, nullptr);
+    // REVIEW-UI P2 (L-16): cue banner documents the query syntax right in
+    // the box (visible while focused too).
+    SendMessageW(h.editSearch, EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(
+                     L"输入关键词；folder: / file: / ext:cpp 可加过滤"));
 
     // ---- Sort buttons (shown for scan result tabs, hidden for History/FolderTree) ----
     h.btnSortSize = CreateWindowExW(0, L"BUTTON", L"按大小排序",

@@ -12,30 +12,46 @@ bool SetStockButtonIcon(HWND button, int stockIconId) {
 
     SHSTOCKICONINFO sii{};
     sii.cbSize = sizeof(sii);
+    // REVIEW-UI P2 (L-12): request the 32 px stock icon and scale it to the
+    // DPI-aware small-icon metric — the old SHGSI_SMALLICON path stayed
+    // 16 px at 150% next to 45 px buttons.
     if (FAILED(SHGetStockIconInfo(static_cast<SHSTOCKICONID>(stockIconId),
-                                  SHGSI_ICON | SHGSI_SMALLICON, &sii)) ||
+                                  SHGSI_ICON, &sii)) ||
         !sii.hIcon) {
         return false;
     }
+    int cx = GetSystemMetrics(SM_CXSMICON);
+    int cy = GetSystemMetrics(SM_CYSMICON);
+    if (cx < 16 || cy < 16) { cx = 16; cy = 16; }
+    HICON icon = static_cast<HICON>(CopyImage(sii.hIcon, IMAGE_ICON, cx, cy,
+                                              LR_COPYDELETEORG));
+    if (!icon) icon = sii.hIcon;   // fall back to the unscaled original
+    else       DestroyIcon(sii.hIcon);
 
-    HIMAGELIST himl = ImageList_Create(16, 16, ILC_COLOR32, 1, 1);
+    HIMAGELIST himl = ImageList_Create(cx, cy, ILC_COLOR32, 1, 1);
     if (!himl) {
-        DestroyIcon(sii.hIcon);
+        DestroyIcon(icon);
         return false;
     }
-    if (ImageList_AddIcon(himl, sii.hIcon) < 0) {
-        DestroyIcon(sii.hIcon);
+    if (ImageList_AddIcon(himl, icon) < 0) {
+        DestroyIcon(icon);
         ImageList_Destroy(himl);
         return false;
     }
-    DestroyIcon(sii.hIcon);   // the imagelist holds its own copy
+    DestroyIcon(icon);   // the imagelist holds its own copy
 
     BUTTON_IMAGELIST bil{};
     bil.himl = himl;
     bil.margin = {2, 0, 3, 0};
     bil.uAlign = BUTTON_IMAGELIST_ALIGN_LEFT;
-    // The button borrows the imagelist; it must stay alive for the control's
-    // lifetime (freed implicitly at process exit).
+    // The button borrows the imagelist; the PREVIOUS one (set by an earlier
+    // call — the scan button flips between find/stop icons, v2.5 L-22) is
+    // destroyed here instead of leaking one per task.
+    BUTTON_IMAGELIST old{};
+    if (SendMessageW(button, BCM_GETIMAGELIST, 0,
+                    reinterpret_cast<LPARAM>(&old)) && old.himl) {
+        ImageList_Destroy(old.himl);
+    }
     if (SendMessageW(button, BCM_SETIMAGELIST, 0,
                      reinterpret_cast<LPARAM>(&bil)) == 0) {
         ImageList_Destroy(himl);

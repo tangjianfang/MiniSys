@@ -8,6 +8,7 @@
 #include "core/SessionService.h"
 #include "core/VolumeIndex.h"
 #include "ui/Controls.h"
+#include "ui/Dialogs.h"
 #include "ui/Icons.h"
 #include "ui/Layout.h"
 
@@ -60,6 +61,36 @@ std::wstring FormatCount(size_t n) {
     return out;
 }
 
+// v2.5 cached results: human-readable age of a FILETIME timestamp.
+std::wstring FormatAge(uint64_t filetime) {
+    if (filetime == 0) return {};
+    FILETIME localNow{};
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    SystemTimeToFileTime(&st, &localNow);
+    uint64_t now = (static_cast<uint64_t>(localNow.dwHighDateTime) << 32) |
+                   localNow.dwLowDateTime;
+    uint64_t ageMs = (now > filetime) ? (now - filetime) / 10000 : 0;
+    if (ageMs < 10 * 60 * 1000) return L"刚刚";
+    if (ageMs < 60 * 60 * 1000) {
+        return std::to_wstring(ageMs / (60 * 1000)) + L" 分钟前";
+    }
+    if (ageMs < 24ULL * 3600 * 1000) {
+        return std::to_wstring(ageMs / (3600 * 1000)) + L" 小时前";
+    }
+    ULARGE_INTEGER ul{};
+    ul.QuadPart = filetime;
+    FILETIME local{};
+    local.dwLowDateTime  = ul.LowPart;
+    local.dwHighDateTime = ul.HighPart;
+    SYSTEMTIME out{};
+    FileTimeToSystemTime(&local, &out);
+    wchar_t buf[64] = {};
+    swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d",
+               out.wYear, out.wMonth, out.wDay, out.wHour, out.wMinute);
+    return buf;
+}
+
 } // namespace
 
 bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
@@ -86,7 +117,11 @@ bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
     }
     hwnd_ = CreateWindowExW(0, kWindowClass, kWindowTitle,
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        // REVIEW-UI P2 (L-12): the old fixed 1100×720 physical pixels
+        // shrank with every DPI step — scale the initial size for the
+        // primary monitor's DPI.
+        UiScale(nullptr, 1100), UiScale(nullptr, 720),
         nullptr, nullptr, hInst, this);
     if (!hwnd_) {
         MessageBoxW(nullptr, L"CreateWindow failed", L"MiniSys", MB_ICONERROR);
@@ -304,6 +339,22 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP_SCAN_PROGRESS:
+            // REVIEW-UI P2 (L-13): wp = done, lp = total. A phase that knows
+            // its totals switches the bar from marquee to a percentage; the
+            // next indeterminate phase switches it back.
+            if (lp > 0 && wp <= static_cast<unsigned long long>(lp)) {
+                if (!progDeterminate_) {
+                    SendMessageW(h_.progress, PBM_SETMARQUEE, FALSE, 0);
+                    progDeterminate_ = true;
+                }
+                SendMessageW(h_.progress, PBM_SETPOS,
+                             static_cast<int>(wp * 100 /
+                                 static_cast<unsigned long long>(lp)), 0);
+            } else if (progDeterminate_) {
+                progDeterminate_ = false;
+                SendMessageW(h_.progress, PBM_SETPOS, 0, 0);
+                SendMessageW(h_.progress, PBM_SETMARQUEE, TRUE, 25);
+            }
             UpdateStatusBar();
             return 0;
         case WM_APP_OP_PROGRESS:
@@ -347,6 +398,11 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 // A previous search was still draining — try again.
                 KillTimer(hwnd_, TIMER_SEARCH_RETRY);
                 if (taskMode_ == TaskMode::None) RunSearch();
+            } else if (wp == TIMER_IDLE_REFRESH) {
+                // v2.5 cached results: while the user is away, refresh the
+                // active tab's stale list in the background — the cache
+                // stays accurate without anyone asking.
+                OnIdleCheck();
             }
             return 0;
         case WM_CLOSE:
@@ -391,6 +447,16 @@ void MainWindow::OnCreate() {
 
     OnTabChanged();
     LoadSettings();   // REVIEW P2: restore persisted state + exclusions
+    // v2.5 cached results: restore the last session's scan lists so tabs
+    // open populated; each tab's staleness is judged separately and shown
+    // ("上次扫描: …（缓存）"). Execution re-verifies every item regardless.
+    for (int i = 0; i < static_cast<int>(TabId::Count); ++i) {
+        svc.TryLoadCachedResults(static_cast<TabId>(i));
+    }
+    // The active tab rendered before the cache load — re-render it now.
+    if (auto* p = ActivePresenter()) p->Refresh();
+    // v2.5: idle-time refresh cadence (see OnIdleCheck).
+    SetTimer(hwnd_, TIMER_IDLE_REFRESH, 30 * 1000, nullptr);
     UpdateStatusBar();
     UpdateExecButton();
 }
@@ -400,6 +466,9 @@ void MainWindow::OnSize() {
     LayoutWindow(h_, rc.right, rc.bottom,
                  CurrentTab() == TabId::LargeFiles,
                  CurrentTab() == TabId::Search);
+    // v2.5: the progress bar overlays the 4th status pane — reposition it
+    // whenever the parts move.
+    UpdateStatusBar();
 }
 
 TabId MainWindow::CurrentTab() const {
@@ -412,6 +481,50 @@ TabPresenter* MainWindow::ActivePresenter() const {
     // control; cast-to-size_t of -1 indexed past the array.
     if (t < TabId::Junk || t >= TabId::Count) return nullptr;
     return presenters_[static_cast<size_t>(t)].get();
+}
+
+// v2.5 cached results: "上次扫描: …" provenance line, judged per tab.
+std::wstring MainWindow::ComposeScanTimeLine() const {
+    auto& svc = SessionService::Instance();
+    uint64_t at = svc.LastScanAt(CurrentTab());
+    if (at == 0) return {};
+    std::wstring line = L"上次扫描: " + FormatAge(at);
+    if (svc.ResultsFromCache(CurrentTab())) line += L"（上次会话的缓存结果）";
+    line += L" — 执行前会逐项复验文件是否已变化。\n";
+    return line;
+}
+
+// v2.5 cached results: while the user has been idle for 5+ minutes and the
+// active tab's data is older than 30 minutes, rescan it automatically.
+void MainWindow::OnIdleCheck() {
+    if (taskMode_ != TaskMode::None) return;
+    LASTINPUTINFO li{ sizeof(li) };
+    if (!GetLastInputInfo(&li)) return;
+    DWORD idleMs = GetTickCount() - li.dwTime;
+    if (idleMs < 5u * 60u * 1000u) return;
+    if (!IsWindowVisible(hwnd_)) return;
+
+    auto t = CurrentTab();
+    if (t != TabId::Junk && t != TabId::LargeFiles && t != TabId::Apps &&
+        t != TabId::FolderTree) {
+        return;
+    }
+    auto& svc = SessionService::Instance();
+    uint64_t at = svc.LastScanAt(t);
+    uint64_t ageMs = 0;
+    if (at != 0) {
+        FILETIME ftNow{};
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        SystemTimeToFileTime(&st, &ftNow);
+        uint64_t now = (static_cast<uint64_t>(ftNow.dwHighDateTime) << 32) |
+                       ftNow.dwLowDateTime;
+        ageMs = (now > at) ? (now - at) / 10000 : 0;
+    }
+    if (at != 0 && ageMs < 30ULL * 60 * 1000) return;   // fresh enough
+
+    ShowHint(L"ℹ 系统空闲 — 正在自动刷新本页扫描结果…");
+    OnScan();
 }
 
 void MainWindow::OnTabChanged() {
@@ -464,12 +577,14 @@ void MainWindow::OnTabChanged() {
         case TabId::Junk:
             tabInfoText_ =
                 L"扫描系统/浏览器/开发缓存等可清理项；勾选后执行将移入隔离区，可在“操作历史”一键还原。\n"
+                L"· 含程序员构建缓存（bin/obj/.vs/ipch/x64 等，仅限项目目录内；24 小时内编译过的跳过）。\n"
                 L"⚠ 危险项（清空回收站、WinSxS 等）默认不勾选；“清空隔离区”后才真正释放空间。";
             break;
         case TabId::Search:
             tabInfoText_ =
                 L"输入即搜（多词为“并且”，支持 * ? 通配符）；双击定位文件，勾选后可移入隔离区。\n"
-                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建。";
+                L"· 过滤词（参考 Everything）：folder: 仅文件夹 · file: 仅文件 · ext:cpp;h 按扩展名。\n"
+                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建，结果有变化时自动增量更新。";
             break;
         case TabId::LargeFiles:
             tabInfoText_ =
@@ -493,7 +608,8 @@ void MainWindow::OnTabChanged() {
             break;
         default: tabInfoText_.clear(); break;
     }
-    SetWindowTextW(h_.info, tabInfoText_.c_str());
+    // v2.5: provenance line for tabs with cached/persisted results.
+    SetWindowTextW(h_.info, (ComposeScanTimeLine() + tabInfoText_).c_str());
 
     if (t == TabId::Search) {
         // v2.3: auto-build the index on first visit.
@@ -516,13 +632,17 @@ void MainWindow::OnTabChanged() {
 }
 
 void MainWindow::UpdateStatusBar() {
-    // Three status-bar parts: disk | quarantine/migrate-target | progress.
+    // Four status-bar parts: disk | quarantine/migrate-target | progress
+    // text | (empty strip the progress BAR overlays — v2.5: the bar used to
+    // float over the list's scrollbar at the bottom-right).
     RECT rc; GetClientRect(h_.status, &rc);
     int W = rc.right;
-    int e0 = 340, e1 = 660;
-    if (e1 > W - 160) { e0 = W / 3; e1 = 2 * W / 3; }
-    int edges[3] = { e0, e1, -1 };
-    SendMessageW(h_.status, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(edges));
+    int barW = UiScale(hwnd_, 220);
+    int e0 = UiScale(hwnd_, 340), e1 = UiScale(hwnd_, 660);
+    if (e1 > W - barW - 160) { e0 = W / 4; e1 = W / 2; }
+    int e2 = (W - barW > e1 + 40) ? (W - barW) : (3 * W / 4);
+    int edges[4] = { e0, e1, e2, -1 };
+    SendMessageW(h_.status, SB_SETPARTS, 4, reinterpret_cast<LPARAM>(edges));
 
     std::wstring disk;
     DiskSpace ds;
@@ -545,6 +665,20 @@ void MainWindow::UpdateStatusBar() {
     SendMessageW(h_.status, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(disk.c_str()));
     SendMessageW(h_.status, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(mid.c_str()));
     SendMessageW(h_.status, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(prog.c_str()));
+    SendMessageW(h_.status, SB_SETTEXTW, 3,
+                 reinterpret_cast<LPARAM>(L""));
+
+    // Overlay the progress bar on the reserved 4th pane.
+    RECT pane{};
+    if (SendMessageW(h_.status, SB_GETRECT, 3,
+                     reinterpret_cast<LPARAM>(&pane))) {
+        POINT tl{ pane.left, pane.top };
+        POINT br{ pane.right, pane.bottom };
+        MapWindowPoints(h_.status, hwnd_, &tl, 1);
+        MapWindowPoints(h_.status, hwnd_, &br, 1);
+        SetWindowPos(h_.progress, nullptr, tl.x + 2, tl.y + 2,
+                     (br.x - tl.x) - 4, (br.y - tl.y) - 4, SWP_NOZORDER);
+    }
 }
 
 void MainWindow::OnScan() {
@@ -587,8 +721,17 @@ void MainWindow::UpdateSearchStatus() {
     wchar_t buf[512] = {};
     GetWindowTextW(h_.editSearch, buf, 512);
     if (buf[0] == L'\0') {
-        ShowHint(FormatW(L"索引就绪：%s 项。输入关键词即可开始搜索。",
-                         FormatCount(sp->TotalIndexed()).c_str()));
+        // REVIEW-UI P2 (L-24, search-tab half): a <10k-entry "ready" index is
+        // broken — the junk tab said so since v2.4; the search tab claimed
+        // "索引就绪" regardless.
+        if (vi.EntryCount() < 10000) {
+            ShowHint(FormatW(
+                L"⚠ 索引条目异常少（%s 项），搜索结果可能不完整，建议点“重建索引”。",
+                FormatCount(sp->TotalIndexed()).c_str()));
+        } else {
+            ShowHint(FormatW(L"索引就绪：%s 项。输入关键词即可开始搜索。",
+                             FormatCount(sp->TotalIndexed()).c_str()));
+        }
     } else {
         ShowHint(FormatW(L"匹配 %s 项（索引共 %s 项，最多显示前 1,000）。",
                          FormatCount(shown).c_str(),
@@ -665,7 +808,9 @@ void MainWindow::OnScanDone() {
     }
 
     if (!composed.empty()) {
-        SetWindowTextW(h_.info, (composed + tabInfoText_).c_str());
+        SetWindowTextW(h_.info, (composed + ComposeScanTimeLine() + tabInfoText_).c_str());
+    } else {
+        SetWindowTextW(h_.info, (ComposeScanTimeLine() + tabInfoText_).c_str());
     }
     UpdateStatusBar();
     UpdateExecButton();
@@ -695,12 +840,21 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     bool searchTab = (CurrentTab() == TabId::Search);
     SetWindowTextW(h_.scan, scanning ? L"取消"
                                      : (searchTab ? L"重建索引" : L"扫描"));
+    // v2.5 (L-22, live-confirmed): while the button means CANCEL it must not
+    // keep the magnifying-glass icon — swap to the red ✕ (this SDK has no
+    // SIID_STOP; SIID_DELETE's glyph is the standard cancel cross) and back.
+    if (scanning != scanIconIsStop_) {
+        icons::SetStockButtonIcon(h_.scan, scanning ? SIID_DELETE : SIID_FIND);
+        scanIconIsStop_ = scanning;
+    }
 
     if (mode == TaskMode::None) {
+        progDeterminate_ = false;
         SendMessageW(h_.progress, PBM_SETMARQUEE, FALSE, 0);
         ShowWindow(h_.progress, SW_HIDE);
         UpdateExecButton();
     } else if (scanning) {
+        progDeterminate_ = false;
         SendMessageW(h_.progress, PBM_SETPOS, 0, 0);
         SendMessageW(h_.progress, PBM_SETMARQUEE, TRUE, 25);
         ShowWindow(h_.progress, SW_SHOW);
@@ -914,11 +1068,13 @@ void MainWindow::OnExecute() {
         if (pressed != IDOK) return;
         createRestorePoint = (verified == TRUE);
     } else {
+        // REVIEW-UI P2 (L-9): unified TaskDialog confirm (default CANCEL).
         confirm += L"\n确定继续？";
-        if (MessageBoxW(hwnd_, confirm.c_str(), L"确认操作",
-                MB_OKCANCEL | MB_DEFBUTTON2 |
-                    ((gDelegate.count || hasRecycleBin) ? MB_ICONWARNING
-                                                        : MB_ICONQUESTION)) != IDOK) {
+        if (!dialogs::ConfirmTask(hwnd_, L"确认操作",
+                FormatW(L"将处理 %zu 项，合计 %s", selected.size(),
+                        FormatSize(totalSize).c_str()),
+                confirm,
+                (gDelegate.count || hasRecycleBin))) {
             return;
         }
     }
@@ -990,9 +1146,10 @@ void MainWindow::OnEmptyQuarantine() {
         L"将永久删除隔离区中的所有文件并释放空间，此操作不可撤销。\n%s\n\n确定继续？",
         usage.empty() ? L"" : (L"当前占用: " + usage).c_str());
     // REVIEW P0-6 (07-X5): the single irreversible file deletion in the app
-    // defaults to CANCEL.
-    if (MessageBoxW(hwnd_, confirm.c_str(), L"清空隔离区",
-            MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING) != IDOK) {
+    // defaults to CANCEL. REVIEW-UI P2 (L-9): unified TaskDialog.
+    if (!dialogs::ConfirmTask(hwnd_, L"清空隔离区",
+            L"永久删除隔离区中的所有文件？", confirm,
+            /*warning=*/true, L"清空（不可恢复）")) {
         return;
     }
     if (!svc.EmptyQuarantine()) {
@@ -1010,15 +1167,21 @@ void MainWindow::OnAbout() {
     tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.2";
+    // REVIEW-UI P2 (L-18): version + the search tab finally documented.
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.5";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
         L"\n【使用说明】\n"
-        L"· 垃圾清理：扫描后勾选执行，项目移入隔离区；“清空隔离区”才真正释放空间。\n"
+        L"· 垃圾清理：扫描后勾选执行，项目移入隔离区；“清空隔离区”才真正释放空间。"
+        L"含程序员构建缓存（bin/obj/.vs 等）。\n"
+        L"· 文件搜索：输入即搜全盘（参考 Everything）；过滤词 folder: / file: / ext:cpp;h；"
+        L"双击定位文件；索引缓存加速启动并自动增量更新。\n"
         L"· 大文件/去重：按大小、类型、磁盘过滤；重复文件保留最新一份，预选其余副本。\n"
         L"· 应用迁移：先选目标盘再执行；原位置以 Junction 保持路径可用，历史页可撤销。\n"
         L"· 文件夹分析：右键顶层文件夹可移入隔离区。\n"
+        L"· 扫描结果会跨会话缓存并显示“上次扫描”时间；系统空闲时自动刷新过期结果"
+        L"（执行前仍会逐项复验）。\n"
         L"\n【注意事项】\n"
         L"· 系统目录（Windows、WinSxS、System32 等）一律拒绝操作。\n"
         L"· 组件存储/休眠文件通过系统命令（DISM / powercfg）处理，耗时数分钟属正常。\n"
@@ -1170,14 +1333,18 @@ void MainWindow::OnListContextMenu() {
     DWORD pos = GetMessagePos();
     POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, IDM_LIST_OPEN,       L"打开所在位置\tEnter");
+    // REVIEW-UI P2 (L-15): the Enter shortcut hint is only true on the
+    // search tab (Enter activates the row → locate). "此文件夹" was wrong
+    // for file rows — files and folders both get "此项目".
+    AppendMenuW(hMenu, MF_STRING, IDM_LIST_OPEN,
+        t == TabId::Search ? L"打开所在位置\tEnter" : L"打开所在位置");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_INFO,       L"说明（这是什么？）…");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTALL,  L"全选\tCtrl+A");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTNONE, L"全不选");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_PREVIEW,    L"预览执行（安全闸检查）…");
-    AppendMenuW(hMenu, MF_STRING, IDM_LIST_EXCLUDE,    L"永不清理此文件夹");
+    AppendMenuW(hMenu, MF_STRING, IDM_LIST_EXCLUDE,    L"永不清理此项目");
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                              pt.x, pt.y, 0, hwnd_, nullptr);
     DestroyMenu(hMenu);

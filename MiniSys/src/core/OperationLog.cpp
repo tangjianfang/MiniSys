@@ -219,6 +219,7 @@ void OperationLog::Append(const OpRecord& rec) {
         return;
     }
     f << WideToUtf8(RecordToJson(rec).Dump()) << "\n";
+    ++gen_;
 }
 
 void OperationLog::UpdateStatus(const std::wstring& id, OpStatus status,
@@ -236,6 +237,7 @@ void OperationLog::UpdateStatus(const std::wstring& id, OpStatus status,
         }
     }
     RewriteAtomic(JsonlPath(), oldestFirst);
+    ++gen_;
 }
 
 void OperationLog::UpdateStatusBulk(const std::vector<std::wstring>& ids,
@@ -254,11 +256,17 @@ void OperationLog::UpdateStatusBulk(const std::vector<std::wstring>& ids,
         }
     }
     RewriteAtomic(JsonlPath(), oldestFirst);
+    ++gen_;
 }
 
 std::vector<OpRecord> OperationLog::LoadAll() {
     std::lock_guard<std::mutex> g(mu_);
     return LoadAllLocked();
+}
+
+uint64_t OperationLog::Generation() {
+    std::lock_guard<std::mutex> g(mu_);
+    return gen_;
 }
 
 // Lock-free core of LoadAll (caller holds mu_).

@@ -1,6 +1,7 @@
 #include "core/VolumeIndex.h"
 
 #include "util/Logger.h"
+#include "util/PathUtils.h"
 #include "core/JunkRules.h"
 #include "util/StringUtils.h"
 #include <string_view>
@@ -8,7 +9,9 @@
 #include <windows.h>
 #include <winioctl.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <share.h>
 
 namespace minisys {
 
@@ -189,6 +192,13 @@ void VolumeIndex::Finalize() {
 bool VolumeIndex::EnsureBuilt(wchar_t drive,
                               const std::function<void(const std::wstring&)>& progress,
                               const std::atomic<bool>& cancel) {
+    if (!(valid_ && drive == drive_)) {
+        // v2.5: disk cache first — the journal refresh below brings it
+        // current (or rejects it) exactly like an in-memory index.
+        if (TryLoadCache(drive) && progress) {
+            progress(L"已加载索引缓存: " + std::to_wstring(nodes_.size()) + L" 项");
+        }
+    }
     if (valid_ && drive == drive_) {
         // Cheap revalidation: volume serial + journal identity.
         DWORD serial = 0;
@@ -197,14 +207,19 @@ bool VolumeIndex::EnsureBuilt(wchar_t drive,
             if (static_cast<uint64_t>(serial) == volumeSerial_) {
                 // Same volume — try an incremental refresh (M3) before
                 // considering a rebuild.
-                if (RefreshFromUsn(cancel)) return true;
+                if (RefreshFromUsn(cancel)) {
+                    SaveCacheIfWorthwhile();
+                    return true;
+                }
                 valid_.store(false, std::memory_order_release);
                 return BuildFull(drive, progress, cancel);
             }
         }
         valid_.store(false, std::memory_order_release);
     }
-    return BuildFull(drive, progress, cancel);
+    bool ok = BuildFull(drive, progress, cancel);
+    if (ok) SaveCacheIfWorthwhile();
+    return ok;
 }
 
 bool VolumeIndex::BuildFull(wchar_t drive,
@@ -250,61 +265,109 @@ bool VolumeIndex::BuildFull(wchar_t drive,
     }
 
     if (ok) {
-        // v2.2 (REVIEW P0-7 / 03-B1): on the current SDK MFT_ENUM_DATA is an
-        // alias of MFT_ENUM_DATA_V1 — zero-init left Min/MaxMajorVersion at
-        // 0/0, an illegal version range, so FSCTL_ENUM_USN_DATA failed with
-        // Win32 87 on every machine and the index never built.
-        MFT_ENUM_DATA_V1 med{};
-        med.MinMajorVersion = 2;   // V2 (NTFS) + V3 (ReFS/128-bit IDs)
-        med.MaxMajorVersion = 3;
         std::vector<char> buf(64 * 1024);
-        DWORD ret = 0;
-        size_t reported = 0;
-        for (;;) {
-            if (cancel.load()) { ok = false; break; }
-            if (!DeviceIoControl(vol, FSCTL_ENUM_USN_DATA, &med, sizeof(med),
-                                 buf.data(), static_cast<DWORD>(buf.size()),
-                                 &ret, nullptr)) {
-                DWORD e = GetLastError();
-                if (e == ERROR_HANDLE_EOF) break;         // enumeration complete
-                MS_LOG_WARN(L"VolumeIndex: FSCTL_ENUM_USN_DATA failed (Win32 %lu)",
-                            e);
-                ok = false;
-                break;
+        // v2.2 (REVIEW P0-7 / 03-B1): MFT_ENUM_DATA is an alias of V1 on the
+        // current SDK — Min/MaxMajorVersion must be 2..3 or the FSCTL fails
+        // with Win32 87.
+        //
+        // v2.5: two live machines report a deterministic TRUNCATED enum
+        // (27 / 456 records instead of millions, no error — plain EOF). Docs
+        // confirm zeroed LowUsn/HighUsn mean "no bound", so the V1 request
+        // below is textbook-correct; the defect is not reproducible by
+        // inspection. Strategy: (a) log per-batch diagnostics so the next
+        // run pinpoints exactly where the stream stops, (b) when the V1
+        // result looks truncated for a system volume, transparently retry
+        // with the classic V0 request (V2 records only).
+        auto enumerate = [&](bool useV1) -> bool {
+            nodes_.clear();
+            names_.clear();
+            MFT_ENUM_DATA_V1 medV1{};
+            MFT_ENUM_DATA_V0 medV0{};
+            if (useV1) {
+                medV1.MinMajorVersion = 2;   // V2 (NTFS) + V3 (ReFS/128-bit IDs)
+                medV1.MaxMajorVersion = 3;
             }
-            if (ret <= sizeof(DWORDLONG)) break;          // only the next-USN marker
-            DWORDLONG nextFrn = *reinterpret_cast<DWORDLONG*>(buf.data());
-            size_t off = sizeof(DWORDLONG);
-            while (off + sizeof(DWORD) <= ret) {
-                auto* hdr = reinterpret_cast<const USN_RECORD_COMMON_HEADER*>(
-                    buf.data() + off);
-                if (hdr->RecordLength < sizeof(*hdr) || off + hdr->RecordLength > ret) {
-                    break;
+            void* med   = useV1 ? static_cast<void*>(&medV1) : static_cast<void*>(&medV0);
+            DWORD medSz = useV1 ? sizeof(medV1) : sizeof(medV0);
+            DWORD ret = 0;
+            size_t batches = 0, skipped = 0, reported = 0;
+            for (;;) {
+                if (cancel.load()) return false;
+                if (!DeviceIoControl(vol, FSCTL_ENUM_USN_DATA, med, medSz,
+                                     buf.data(), static_cast<DWORD>(buf.size()),
+                                     &ret, nullptr)) {
+                    DWORD e = GetLastError();
+                    if (e == ERROR_HANDLE_EOF) break;     // enumeration complete
+                    MS_LOG_WARN(L"VolumeIndex: FSCTL_ENUM_USN_DATA(V%d) failed "
+                                L"after %zu records (Win32 %lu)",
+                                useV1 ? 1 : 0, nodes_.size(), e);
+                    return false;
                 }
-                ParsedRecord pr;
-                if (ParseUsnRecord(reinterpret_cast<const BYTE*>(buf.data() + off),
-                                   pr) &&
-                    pr.nameLenBytes > 0 && (pr.nameLenBytes % sizeof(WCHAR)) == 0) {
-                    Node n;
-                    n.frn = pr.frn;
-                    n.parentFrn = pr.pfrn;
-                    n.attrs = pr.attrs;
-                    n.lastWrite = pr.mtime;
-                    n.isDir = (pr.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                    n.nameOff = static_cast<uint32_t>(names_.size());
-                    n.nameLen = pr.nameLenBytes / sizeof(WCHAR);
-                    names_.append(pr.name, n.nameLen);
-                    nodes_.push_back(n);
+                ++batches;
+                if (ret <= sizeof(DWORDLONG)) break;      // only the next-FRN marker
+                DWORDLONG nextFrn = *reinterpret_cast<DWORDLONG*>(buf.data());
+                size_t off = sizeof(DWORDLONG);
+                size_t batchRecords = 0;
+                while (off + sizeof(DWORD) <= ret) {
+                    auto* hdr = reinterpret_cast<const USN_RECORD_COMMON_HEADER*>(
+                        buf.data() + off);
+                    if (hdr->RecordLength < sizeof(*hdr) ||
+                        off + hdr->RecordLength > ret) {
+                        ++skipped;
+                        break;
+                    }
+                    ParsedRecord pr;
+                    if (ParseUsnRecord(
+                            reinterpret_cast<const BYTE*>(buf.data() + off), pr) &&
+                        pr.nameLenBytes > 0 &&
+                        (pr.nameLenBytes % sizeof(WCHAR)) == 0) {
+                        Node n;
+                        n.frn = pr.frn;
+                        n.parentFrn = pr.pfrn;
+                        n.attrs = pr.attrs;
+                        n.lastWrite = pr.mtime;
+                        n.isDir = (pr.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        n.nameOff = static_cast<uint32_t>(names_.size());
+                        n.nameLen = pr.nameLenBytes / sizeof(WCHAR);
+                        names_.append(pr.name, n.nameLen);
+                        nodes_.push_back(n);
+                        ++batchRecords;
+                    } else {
+                        ++skipped;
+                    }
+                    off += hdr->RecordLength;
                 }
-                off += hdr->RecordLength;
+                // Diagnostics: the first batches + a heartbeat every 200.
+                if (batches <= 3 || (batches % 200) == 0) {
+                    MS_LOG_INFO(L"VolumeIndex: batch %zu: %lu bytes, %zu records "
+                                L"(total %zu, skipped %zu)",
+                                batches, ret, batchRecords, nodes_.size(), skipped);
+                }
+                if (reported + 100000 <= nodes_.size()) {
+                    reported = nodes_.size();
+                    if (progress) {
+                        progress(L"索引: " + std::to_wstring(nodes_.size()) + L" 项");
+                    }
+                }
+                if (useV1) medV1.StartFileReferenceNumber = nextFrn;
+                else       medV0.StartFileReferenceNumber = nextFrn;
             }
-            if (reported + 100000 <= nodes_.size()) {
-                reported = nodes_.size();
-                if (progress) {
-                    progress(L"索引: " + std::to_wstring(nodes_.size()) + L" 项");
-                }
+            MS_LOG_INFO(L"VolumeIndex: enum done (V%d): %zu records in %zu batches, "
+                        L"%zu skipped",
+                        useV1 ? 1 : 0, nodes_.size(), batches, skipped);
+            return true;
+        };
+        ok = enumerate(true);
+        if (ok && nodes_.size() < 10000) {
+            size_t v1Count = nodes_.size();
+            MS_LOG_WARN(L"VolumeIndex: V1 enumeration returned only %zu records — "
+                        L"retrying with the V0 request", v1Count);
+            if (enumerate(false) && nodes_.size() > v1Count) {
+                MS_LOG_INFO(L"VolumeIndex: V0 retry recovered %zu records (V1 gave "
+                            L"%zu) — the V1 path is broken on this machine",
+                            nodes_.size(), v1Count);
             }
-            med.StartFileReferenceNumber = nextFrn;
+            // If V0 is also tiny the volume may genuinely be small — keep it.
         }
     }
 
@@ -608,12 +671,47 @@ std::wstring VolumeIndex::OriginalCasePathOf(const Node& n) const {
     return path;
 }
 
+VolumeIndex::SearchFilter VolumeIndex::ParseFilterTerms(const std::wstring& query,
+                                                         std::wstring& freeQuery) {
+    SearchFilter f;
+    freeQuery.clear();
+    for (const auto& tok : SplitQuery(query)) {
+        std::wstring lower = ToLower(tok);
+        if (lower == L"folder:" || lower == L"is:folder" || lower == L"dir:") {
+            f.dirsOnly = true;
+        } else if (lower == L"file:" || lower == L"is:file") {
+            f.filesOnly = true;
+        } else if (lower.rfind(L"ext:", 0) == 0 && tok.size() > 4) {
+            std::wstring cur;
+            for (wchar_t ch : tok.substr(4)) {
+                if (ch == L';' || ch == L',' || ch == L'|') {
+                    if (!cur.empty()) { f.exts.push_back(ToLower(cur)); cur.clear(); }
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty()) f.exts.push_back(ToLower(cur));
+        } else {
+            if (!freeQuery.empty()) freeQuery += L' ';
+            freeQuery += tok;
+        }
+    }
+    for (auto& e : f.exts) {
+        if (!e.empty() && e[0] == L'.') e.erase(0, 1);   // "ext:.cpp" → "cpp"
+    }
+    return f;
+}
+
 size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
                            size_t maxResults,
-                           const std::function<bool(const SearchHit&)>& sink) const {
+                           const std::function<bool(const SearchHit&)>& sink,
+                           const SearchFilter& filter) const {
     if (!ready_) return 0;
     auto terms = SplitQuery(query);
-    if (terms.empty() || maxResults == 0) return 0;
+    bool hasFilter = filter.dirsOnly || filter.filesOnly || !filter.exts.empty();
+    // Empty terms match everything — allowed only when a filter token
+    // constrains the stream ("folder:" alone lists directories, Everything-style).
+    if ((terms.empty() && !hasFilter) || maxResults == 0) return 0;
 
     // Pass 1: collect matching nodes (name-first matching avoids path
     // construction for the common case; a term that fails on the name is
@@ -622,9 +720,32 @@ size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
     std::vector<RawHit> hits;
     hits.reserve(maxResults < 4096 ? maxResults : 4096);
 
+    auto extMatches = [&](std::wstring_view name) {
+        auto dot = name.rfind(L'.');
+        if (dot == std::wstring_view::npos) return false;
+        std::wstring_view ext = name.substr(dot + 1);
+        for (const auto& e : filter.exts) {
+            if (ext.size() != e.size()) continue;
+            size_t i = 0;
+            for (; i < ext.size(); ++i) {
+                if (FoldCh(ext[i]) != e[i]) break;
+            }
+            if (i == ext.size()) return true;
+        }
+        return false;
+    };
+
     for (uint32_t i = 0; i < nodes_.size() && hits.size() < maxResults; ++i) {
         const Node& n = nodes_[i];
         if (n.frn == 0 || n.parentFrn == n.frn) continue;   // tombstone/root
+        // v2.5 Everything-style filters — applied during the scan so filtered
+        // entries never consume a result slot.
+        if (filter.dirsOnly && !n.isDir) continue;
+        if (filter.filesOnly && n.isDir) continue;
+        if (!filter.exts.empty() && (n.isDir || !extMatches(
+                std::wstring_view(names_.data() + n.nameOff, n.nameLen)))) {
+            continue;
+        }
         std::wstring_view name(names_.data() + n.nameOff, n.nameLen);
 
         std::wstring lowerPath;                    // built at most once per node
@@ -687,6 +808,162 @@ size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
         if (!sink(hit) || emitted >= maxResults) break;
     }
     return emitted;
+}
+
+// ---- v2.5: disk cache ------------------------------------------------------
+// Binary layout (little-endian, packed rows — see SaveCacheIfWorthwhile):
+//   magic u32 "MISX" | version u32 | drive wchar | serial u64 | journal u64
+//   nextUsn i64 | nodeCount u64 | nameBytes u64
+//   nodeCount × 40-byte rows | nameBytes bytes of UTF-16 name pool
+
+namespace {
+constexpr uint32_t kCacheMagic   = 0x5853494D;   // "MISX"
+constexpr uint32_t kCacheVersion = 1;
+constexpr size_t   kMinCachedEntries = 10000;    // never persist a truncated index
+
+#pragma pack(push, 1)
+struct CacheRow {
+    uint64_t frn;
+    uint64_t parentFrn;
+    uint64_t lastWrite;
+    uint32_t nameOff;
+    uint32_t nameLen;
+    uint32_t attrs;
+    uint8_t  isDir;
+    uint8_t  pad[3];
+};
+#pragma pack(pop)
+static_assert(sizeof(CacheRow) == 40, "cache row layout");
+
+std::filesystem::path CacheFilePath() {
+    return std::filesystem::path(AppDataDir()) / L"index-cache.bin";
+}
+} // namespace
+
+bool VolumeIndex::TryLoadCache(wchar_t drive) {
+    auto path = CacheFilePath();
+    FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
+    if (!f) return false;
+    bool ok = false;
+    do {
+        uint32_t magic = 0, version = 0;
+        if (fread(&magic, 4, 1, f) != 1 || magic != kCacheMagic) break;
+        if (fread(&version, 4, 1, f) != 1 || version != kCacheVersion) break;
+        wchar_t cDrive = 0;
+        uint64_t cSerial = 0, cJournal = 0, cNodeCount = 0, cNameBytes = 0;
+        int64_t cNextUsn = 0;
+        if (fread(&cDrive, sizeof(wchar_t), 1, f) != 1) break;
+        if (fread(&cSerial, 8, 1, f) != 1) break;
+        if (fread(&cJournal, 8, 1, f) != 1) break;
+        if (fread(&cNextUsn, 8, 1, f) != 1) break;
+        if (fread(&cNodeCount, 8, 1, f) != 1) break;
+        if (fread(&cNameBytes, 8, 1, f) != 1) break;
+        if (cDrive != drive || cNodeCount < kMinCachedEntries ||
+            cNodeCount > 50000000 || cNameBytes == 0 ||
+            cNameBytes % sizeof(wchar_t) != 0) {
+            break;
+        }
+        // The cache is only valid for the same volume.
+        DWORD serial = 0;
+        if (!GetVolumeInformationW(RootPath(drive).c_str(), nullptr, 0, &serial,
+                                   nullptr, nullptr, nullptr, 0)) break;
+        if (static_cast<uint64_t>(serial) != cSerial) break;
+
+        nodes_.resize(static_cast<size_t>(cNodeCount));
+        CacheRow row{};
+        bool rowsOk = true;
+        for (auto& n : nodes_) {
+            if (fread(&row, sizeof(row), 1, f) != 1) { rowsOk = false; break; }
+            n.frn        = row.frn;
+            n.parentFrn  = row.parentFrn;
+            n.lastWrite  = row.lastWrite;
+            n.nameOff    = row.nameOff;
+            n.nameLen    = row.nameLen;
+            n.attrs      = row.attrs;
+            n.isDir      = row.isDir != 0;
+        }
+        if (!rowsOk) break;
+        names_.resize(static_cast<size_t>(cNameBytes) / sizeof(wchar_t));
+        if (!names_.empty() &&
+            fread(names_.data(), sizeof(wchar_t), names_.size(), f) != names_.size()) {
+            break;
+        }
+        // Name offsets must land inside the pool — a corrupt file is
+        // silently discarded rather than trusted.
+        bool boundsOk = true;
+        for (const auto& n : nodes_) {
+            if (n.nameOff > names_.size() ||
+                names_.size() - n.nameOff < n.nameLen) {
+                boundsOk = false;
+                break;
+            }
+        }
+        if (!boundsOk) break;
+
+        drive_        = drive;
+        volumeSerial_ = cSerial;
+        journalId_    = cJournal;
+        nextUsn_      = cNextUsn;
+        Finalize();
+        entryCount_.store(nodes_.size(), std::memory_order_release);
+        valid_.store(true, std::memory_order_release);
+        ok = true;
+        MS_LOG_INFO(L"VolumeIndex: loaded cache for %c: — %zu entries "
+                    L"(journal cursor %lld)", drive_, nodes_.size(),
+                    static_cast<long long>(nextUsn_));
+    } while (false);
+    fclose(f);
+    if (!ok) {
+        nodes_.clear();
+        names_.clear();
+    }
+    return ok;
+}
+
+void VolumeIndex::SaveCacheIfWorthwhile() const {
+    if (!valid_.load(std::memory_order_acquire)) return;
+    if (nodes_.size() < kMinCachedEntries) return;   // truncated indexes stay volatile
+
+    auto final = CacheFilePath();
+    auto tmp = final;
+    tmp += L".tmp";
+    FILE* f = _wfsopen(tmp.c_str(), L"wb", _SH_DENYWR);
+    if (!f) return;
+    bool ok = fwrite(&kCacheMagic, 4, 1, f) == 1 &&
+              fwrite(&kCacheVersion, 4, 1, f) == 1 &&
+              fwrite(&drive_, sizeof(wchar_t), 1, f) == 1 &&
+              fwrite(&volumeSerial_, 8, 1, f) == 1 &&
+              fwrite(&journalId_, 8, 1, f) == 1 &&
+              fwrite(&nextUsn_, 8, 1, f) == 1;
+    uint64_t nodeCount = nodes_.size();
+    uint64_t nameBytes = names_.size() * sizeof(wchar_t);
+    ok = ok && fwrite(&nodeCount, 8, 1, f) == 1 && fwrite(&nameBytes, 8, 1, f) == 1;
+
+    CacheRow row{};
+    for (const auto& n : nodes_) {
+        row.frn       = n.frn;
+        row.parentFrn = n.parentFrn;
+        row.lastWrite = n.lastWrite;
+        row.nameOff   = n.nameOff;
+        row.nameLen   = n.nameLen;
+        row.attrs     = n.attrs;
+        row.isDir     = n.isDir ? 1 : 0;
+        if (fwrite(&row, sizeof(row), 1, f) != 1) { ok = false; break; }
+    }
+    ok = ok && (names_.empty() ||
+                fwrite(names_.data(), sizeof(wchar_t), names_.size(), f) ==
+                    names_.size());
+    fclose(f);
+    if (ok) {
+        std::error_code ec;
+        std::filesystem::remove(final, ec);
+        std::filesystem::rename(tmp, final, ec);
+        if (ec) MS_LOG_WARN(L"VolumeIndex: cache rename failed (%hs)", ec.message().c_str());
+    } else {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        MS_LOG_WARN(L"VolumeIndex: cache write failed — keeping previous");
+    }
 }
 
 bool VolumeIndex::CollectChildren(const std::wstring& dirPath,
