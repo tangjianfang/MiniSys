@@ -64,11 +64,12 @@ public:
     // Indices (into the snapshot) of checked rows.
     std::vector<size_t> CollectChecked() const;
 
-    // v2.7: drop rows whose path no longer exists on disk (deleted outside
-    // the tool, e.g. by hand in Explorer). Cheap — one attribute query per
-    // row. Returns how many were removed; re-renders and syncs the
-    // service-side results when >0.
-    size_t VerifyRows();
+    // v2.7/v2.8: drop rows whose path no longer exists on disk (deleted
+    // outside the tool). The disk checks run on the SessionService worker
+    // (VerifyPathsAsync); this applies the worker's dead-path list
+    // (lowercased) to the snapshot, re-renders and syncs the service-side
+    // results. Returns how many were removed.
+    size_t ApplyDeadPaths(const std::vector<std::wstring>& deadLower);
 
     // REVIEW P1-1: the presenter renders from its own UI-private snapshot
     // — never from the worker-owned storage. Plans are built from it too.

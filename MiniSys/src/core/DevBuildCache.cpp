@@ -6,7 +6,10 @@
 #include "util/StringUtils.h"
 
 #include <windows.h>
+#include <atomic>
+#include <mutex>
 #include <set>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -212,26 +215,66 @@ void Scan(std::vector<ScanItem>& out,
     if (cancel.load()) return;
     if (found.empty()) return;
 
-    // Size the artifact dirs (the expensive part) with progress.
-    size_t done = 0;
-    for (const auto& f : found) {
-        if (cancel.load()) return;
-        ++done;
-        if (progress && ((done & 7) == 0 || done == found.size())) {
-            progress(done, found.size(), L"计算大小: " + f.path.filename().wstring());
+    // Size the artifact dirs — the expensive part. v2.8: parallel worker
+    // pool (the sequential loop left cores idle while one subtree walked);
+    // v2.7's (path, mtime) size cache still short-circuits unchanged dirs.
+    struct Sized {
+        fs::path path;
+        uint64_t mtime = 0;
+        unsigned long long size = 0;
+    };
+    std::vector<Sized> sized(found.size());
+    {
+        unsigned hw = std::thread::hardware_concurrency();
+        if (hw == 0) hw = 4;
+        int n = static_cast<int>(hw);
+        if (n > 8) n = 8;
+        if (n < 2) n = 2;
+        if (static_cast<int>(found.size()) < n) n = static_cast<int>(found.size());
+
+        std::atomic<size_t> next{0};
+        std::atomic<size_t> done{0};
+        std::mutex pmu;   // progress serialization
+        std::vector<std::thread> pool;
+        pool.reserve(n);
+        for (int t = 0; t < n; ++t) {
+            pool.emplace_back([&] {
+                for (;;) {
+                    if (cancel.load()) return;
+                    size_t i = next.fetch_add(1);
+                    if (i >= found.size()) return;
+                    const auto& f = found[i];
+                    Sized s;
+                    s.path = f.path;
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(LongPath(f.path).c_str(),
+                                             GetFileExInfoStandard, &fad)) {
+                        s.mtime = FiletimeOf(fad);
+                        s.size = DirSizeCache::Instance().SizeOf(f.path, s.mtime, 2);
+                    }
+                    sized[i] = std::move(s);
+                    size_t d = done.fetch_add(1) + 1;
+                    {
+                        std::lock_guard<std::mutex> g(pmu);
+                        if (progress && ((d & 7) == 0 || d == found.size())) {
+                            progress(d, found.size(),
+                                     L"计算大小: " + f.path.filename().wstring());
+                        }
+                    }
+                }
+            });
         }
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (!GetFileAttributesExW(LongPath(f.path).c_str(),
-                                  GetFileExInfoStandard, &fad)) continue;
-        // v2.7: sizes go through the session-wide (path, mtime) cache so
-        // repeat scans skip unchanged artifact directories.
-        uint64_t mtime = FiletimeOf(fad);
-        auto size = DirSizeCache::Instance().SizeOf(f.path, mtime, 2);
-        if (size == 0) continue;
-        std::wstring name = f.path.filename().wstring();
-        EmitArtifact(f.path, name, mtime ? mtime : now,
+        for (auto& t : pool) t.join();
+    }
+    if (cancel.load()) return;
+
+    // Emit in discovery order (deterministic despite the parallel sizing).
+    for (const auto& s : sized) {
+        if (s.size == 0) continue;
+        std::wstring name = s.path.filename().wstring();
+        EmitArtifact(s.path, name, s.mtime ? s.mtime : now,
                      IsCautiousArtifactName(name) && !IsSafeArtifactName(name),
-                     size, out);
+                     s.size, out);
     }
     MS_LOG_INFO(L"DevBuildCache: %zu artifact dirs in %zu visited dirs",
                 found.size(), visited);

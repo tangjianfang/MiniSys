@@ -76,6 +76,8 @@ private:
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
     void OnQuickFilterMenu();                 // v2.6: search filter presets
     void OnVerifyList(bool manual);           // v2.7: drop hand-deleted rows
+    void OnVerifyDone();                      // v2.8: worker verify results
+    void OnPreviewDone();                     // v2.8: worker preview report
 };
 
 } // namespace minisys

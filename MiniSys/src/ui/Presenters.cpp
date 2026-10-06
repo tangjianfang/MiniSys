@@ -239,11 +239,11 @@ std::vector<size_t> ListTabPresenter::CollectChecked() const {
 }
 
 // v2.7: "I deleted it by hand in Explorer — the list still shows it."
-// Instead of a full rescan, verify the CURRENT rows against the disk: one
-// GetFileAttributesEx per path (microseconds), ghosts removed, check state
-// preserved, service results synced so the next plan is consistent.
-size_t ListTabPresenter::VerifyRows() {
-    if (snapshot_.empty()) return 0;
+// v2.8: the existence checks run on the worker (VerifyPathsAsync); this
+// applies the resulting dead-path list to the snapshot, preserving the
+// user's explicit checks and syncing the service results (plan hash).
+size_t ListTabPresenter::ApplyDeadPaths(const std::vector<std::wstring>& deadLower) {
+    if (deadLower.empty() || snapshot_.empty()) return 0;
     CaptureCheckState();   // keep the user's explicit checks across the prune
 
     std::vector<ScanItem> kept;
@@ -251,13 +251,9 @@ size_t ListTabPresenter::VerifyRows() {
     size_t removed = 0;
     for (auto& it : snapshot_) {
         // Recycle bin is a pseudo-item, not a path.
-        if (it.path == L"$RECYCLE.BIN") {
-            kept.push_back(std::move(it));
-            continue;
-        }
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (GetFileAttributesExW(LongPath(it.path).c_str(),
-                                 GetFileExInfoStandard, &fad)) {
+        if (it.path == L"$RECYCLE.BIN" ||
+            std::find(deadLower.begin(), deadLower.end(),
+                      ToLower(it.path.wstring())) == deadLower.end()) {
             kept.push_back(std::move(it));
         } else {
             ++removed;

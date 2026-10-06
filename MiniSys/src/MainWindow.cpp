@@ -391,6 +391,14 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             }
             UpdateStatusBar();
             return 0;
+        case WM_APP_VERIFY_DONE:
+            OnVerifyDone();
+            UpdateStatusBar();
+            return 0;
+        case WM_APP_PREVIEW_DONE:
+            OnPreviewDone();
+            UpdateStatusBar();
+            return 0;
         case WM_TIMER:
             // v2.3: search debounce elapsed — apply the query.
             if (wp == TIMER_SEARCH_DEBOUNCE) {
@@ -562,8 +570,8 @@ void MainWindow::OnQuickFilterMenu() {
 }
 
 // v2.7: sync the visible list with reality after out-of-tool deletions.
-// One attribute query per row — a full rescan is not needed to learn that
-// a path disappeared.
+// v2.8: the disk checks run on the worker (attribute queries against
+// hundreds of rows would stutter the UI); WM_APP_VERIFY_DONE applies.
 void MainWindow::OnVerifyList(bool manual) {
     if (taskMode_ != TaskMode::None) return;
     auto t = CurrentTab();
@@ -573,13 +581,41 @@ void MainWindow::OnVerifyList(bool manual) {
     }
     auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
     if (!lp) return;
-    size_t removed = lp->VerifyRows();
+    std::vector<std::wstring> paths;
+    for (const auto& it : lp->Snapshot()) paths.push_back(it.path.wstring());
+    if (!SessionService::Instance().VerifyPathsAsync(t, std::move(paths))) {
+        if (manual) ShowHint(L"ℹ 已有任务在进行中，请稍候。");
+    }
+}
+
+// v2.8: worker verify finished — prune the ghost rows (even if the user
+// switched tabs meanwhile; the presenter outlives the switch).
+void MainWindow::OnVerifyDone() {
+    auto& svc = SessionService::Instance();
+    auto dead = svc.LastDeadPaths();
+    if (dead.empty()) {
+        ShowHint(L"✓ 列表已校验，未发现已删除的项目。");
+        return;
+    }
+    auto tab = svc.LastVerifyTab();
+    if (tab < TabId::Junk || tab >= TabId::Count) return;
+    auto* lp = dynamic_cast<ListTabPresenter*>(
+        presenters_[static_cast<size_t>(tab)].get());
+    if (!lp) return;
+    size_t removed = lp->ApplyDeadPaths(dead);
     if (removed > 0) {
         ShowHint(FormatW(L"ℹ 已移除 %zu 项（在磁盘上已不存在，可能已被手动删除）。", removed));
-        UpdateExecButton();
-    } else if (manual) {
-        ShowHint(L"✓ 列表已校验，未发现已删除的项目。");
+        if (CurrentTab() == tab) UpdateExecButton();
     }
+}
+
+// v2.8: worker preview finished — show the dry-run report.
+void MainWindow::OnPreviewDone() {
+    const auto& rpt = SessionService::Instance().LastPreview();
+    std::wstring content = FormatW(L"通过安全闸：%d 项（可执行）\n被拒：%d 项\n\n%s",
+                                   rpt.pass, rpt.denied, rpt.details.c_str());
+    MessageBoxW(hwnd_, content.c_str(), L"预览执行（不会做任何更改）",
+                MB_OK | MB_ICONINFORMATION);
 }
 
 // v2.5 cached results: "上次扫描: …" provenance line, judged per tab.
@@ -1276,7 +1312,7 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.7";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.8";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
@@ -1371,41 +1407,20 @@ void MainWindow::OnSelectAll() {
 // checked rows and show which would pass / be denied, with reasons. Pure
 // (no side effects); state can drift before a real execute, which planHash
 // and the per-item re-verification still guard.
+// v2.8: the validation loop (canonical-path I/O per item) moved to the
+// worker — the dialog now appears from WM_APP_PREVIEW_DONE.
 void MainWindow::OnPreviewExecution() {
     auto t = CurrentTab();
     auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
     if (!lp) return;
-    const auto& items = lp->Snapshot();
     auto checked = lp->CollectChecked();
     if (checked.empty()) {
         ShowHint(L"ℹ 请先勾选要预览的项目。");
         return;
     }
-    int pass = 0;
-    std::wstring denied;
-    for (size_t idx : checked) {
-        if (idx >= items.size()) continue;
-        const auto& it = items[idx];
-        PlanItem pi;
-        pi.itemIdx = idx;
-        pi.path = it.path;
-        pi.sizeAtScan = it.sizeBytes;
-        pi.lastWriteAtScan = it.lastWriteFiletime;
-        auto ctx = (t == TabId::Apps) ? GuardRails::Context::Migration
-                                      : GuardRails::Context::FileOp;
-        auto verdict = GuardRails::Instance().Validate(pi, it, ctx);
-        if (verdict.allow) {
-            ++pass;
-        } else {
-            denied += FormatW(L"⊘ %s — %s\n", it.title.c_str(),
-                              verdict.reason.c_str());
-        }
+    if (!SessionService::Instance().PreviewAsync(t, lp->Snapshot(), std::move(checked))) {
+        ShowHint(L"ℹ 已有任务在进行中，请稍候。");
     }
-    std::wstring content = FormatW(L"通过安全闸：%d 项（可执行）\n被拒：%d 项\n\n%s",
-                                   pass, static_cast<int>(checked.size()) - pass,
-                                   denied.c_str());
-    MessageBoxW(hwnd_, content.c_str(), L"预览执行（不会做任何更改）",
-                MB_OK | MB_ICONINFORMATION);
 }
 
 // REVIEW P2 (08-F9): add the selected item's path to the exclusion list.

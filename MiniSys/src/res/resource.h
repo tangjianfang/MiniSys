@@ -46,6 +46,9 @@
 #define TIMER_VERIFY_LIST           5     // v2.7: debounced focus-return verify
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)
+// v2.8: worker-side list verify / GuardRails preview completion
+#define WM_APP_VERIFY_DONE          (WM_APP + 7)
+#define WM_APP_PREVIEW_DONE         (WM_APP + 8)
 // Context menu on the list (REVIEW P2)
 #define IDM_LIST_OPEN               3002
 #define IDM_LIST_INFO               3003

@@ -27,6 +27,24 @@ namespace fs = std::filesystem;
 
 namespace minisys {
 
+namespace {
+
+// v2.8: per-task-kind completion message (04-5 contract — every task kind
+// has exactly one DONE message, exceptions included).
+UINT DoneMessageFor(SessionService::TaskKind kind) {
+    switch (kind) {
+        case SessionService::TaskKind::Scanning:   return WM_APP_SCAN_DONE;
+        case SessionService::TaskKind::Searching:  return WM_APP_SEARCH_DONE;
+        case SessionService::TaskKind::Verifying:  return WM_APP_VERIFY_DONE;
+        case SessionService::TaskKind::Previewing: return WM_APP_PREVIEW_DONE;
+        case SessionService::TaskKind::Executing:
+        case SessionService::TaskKind::None:
+        default:                                   return WM_APP_OP_DONE;
+    }
+}
+
+} // namespace
+
 SessionService& SessionService::Instance() {
     static SessionService inst;
     return inst;
@@ -231,8 +249,7 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
     }
     if (worker_.joinable()) worker_.join();
     cancelScan_.store(false);
-    worker_ = std::thread([this, kind, body = std::move(body)]() mutable {
-        // Shell operations (IFileOperation) need COM on this thread.
+    worker_ = std::thread([this, kind, body = std::move(body)]() mutable {        // Shell operations (IFileOperation) need COM on this thread.
         bool com = SUCCEEDED(CoInitializeEx(nullptr,
                           COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
         bool threw = false;
@@ -250,12 +267,7 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
         // post the completion message for the task kind.
         if (threw && hwnd_) {
             SetProgress(L"⚠ 任务异常中断（详见日志）");
-            PostMessageW(hwnd_,
-                kind == TaskKind::Scanning ? WM_APP_SCAN_DONE
-                                           : (kind == TaskKind::Searching
-                                                  ? WM_APP_SEARCH_DONE
-                                                  : WM_APP_OP_DONE),
-                0, 0);
+            PostMessageW(hwnd_, DoneMessageFor(kind), 0, 0);
         }
         if (com) CoUninitialize();
         taskKind_.store(static_cast<int>(TaskKind::None));
@@ -729,6 +741,95 @@ SessionService::UndoResult SessionService::UndoRecord(const OpRecord& rec,
     MoveJunctionOp op(rec.source, rec.target, false);
     op.MutableRecord().id = rec.id;
     return op.Undo(errOut) ? UndoResult::Ok : UndoResult::Failed;
+}
+
+// ---- v2.8 read-only helpers on the worker -----------------------------------
+
+bool SessionService::VerifyPathsAsync(TabId tab, std::vector<std::wstring> paths) {
+    if (paths.empty()) return false;
+    SetProgress(FormatW(L"校验列表（%zu 项）…", paths.size()));
+    HWND hwnd = hwnd_;
+    return StartTask(TaskKind::Verifying, [this, tab, paths = std::move(paths), hwnd]() {
+        std::vector<std::wstring> dead;
+        size_t done = 0;
+        for (const auto& p : paths) {
+            ++done;
+            if ((done & 63) == 0) {
+                SetProgress(FormatW(L"校验 %zu/%zu…", done, paths.size()));
+                Post(hwnd, WM_APP_SCAN_PROGRESS);
+            }
+            if (p.empty() || p == L"$RECYCLE.BIN") continue;   // pseudo-item
+            DWORD attrs = GetFileAttributesW(LongPath(fs::path(p)).c_str());
+            if (attrs == INVALID_FILE_ATTRIBUTES) dead.push_back(ToLower(p));
+        }
+        size_t deadCount = dead.size();
+        {
+            std::lock_guard<std::mutex> g(verifyMu_);
+            lastDead_ = std::move(dead);
+            lastVerifyTab_ = tab;
+        }
+        SetProgress(deadCount == 0
+            ? L"校验完成：列表均为最新"
+            : FormatW(L"校验完成：%zu 项已在磁盘上不存在", deadCount));
+        Post(hwnd, WM_APP_VERIFY_DONE);
+    });
+}
+
+std::vector<std::wstring> SessionService::LastDeadPaths() const {
+    std::lock_guard<std::mutex> g(verifyMu_);
+    return lastDead_;
+}
+
+TabId SessionService::LastVerifyTab() const {
+    std::lock_guard<std::mutex> g(verifyMu_);
+    return lastVerifyTab_;
+}
+
+bool SessionService::PreviewAsync(TabId tab, std::vector<ScanItem> items,
+                                  std::vector<size_t> selected) {
+    if (selected.empty()) return false;
+    SetProgress(FormatW(L"预览安全闸（%zu 项）…", selected.size()));
+    HWND hwnd = hwnd_;
+    return StartTask(TaskKind::Previewing,
+        [this, tab, items = std::move(items), selected = std::move(selected), hwnd]() {
+        PreviewReport rpt;
+        size_t done = 0;
+        auto ctx = (tab == TabId::Apps) ? GuardRails::Context::Migration
+                                        : GuardRails::Context::FileOp;
+        for (size_t idx : selected) {
+            ++done;
+            if ((done & 15) == 0) {
+                SetProgress(FormatW(L"预览 %zu/%zu…", done, selected.size()));
+                Post(hwnd, WM_APP_SCAN_PROGRESS);
+            }
+            if (idx >= items.size()) continue;
+            const auto& it = items[idx];
+            PlanItem pi;
+            pi.itemIdx = idx;
+            pi.path = it.path;
+            pi.sizeAtScan = it.sizeBytes;
+            pi.lastWriteAtScan = it.lastWriteFiletime;
+            auto verdict = GuardRails::Instance().Validate(pi, it, ctx);
+            if (verdict.allow) {
+                ++rpt.pass;
+            } else {
+                ++rpt.denied;
+                rpt.details += FormatW(L"⊘ %s — %s\n", it.title.c_str(),
+                                       verdict.reason.c_str());
+            }
+        }
+        {
+            std::lock_guard<std::mutex> g(previewMu_);
+            lastPreview_ = rpt;
+        }
+        SetProgress(FormatW(L"预览完成：通过 %d · 被拒 %d", rpt.pass, rpt.denied));
+        Post(hwnd, WM_APP_PREVIEW_DONE);
+    });
+}
+
+const SessionService::PreviewReport& SessionService::LastPreview() const {
+    std::lock_guard<std::mutex> g(previewMu_);
+    return lastPreview_;
 }
 
 void SessionService::Shutdown() {

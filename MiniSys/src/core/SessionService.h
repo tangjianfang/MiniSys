@@ -30,7 +30,8 @@ public:
     // nullptr (tests) disables posting.
     void SetWindow(HWND hwnd) { hwnd_ = hwnd; }
 
-    enum class TaskKind { None = 0, Scanning = 1, Executing = 2, Searching = 3 };
+    enum class TaskKind { None = 0, Scanning = 1, Executing = 2, Searching = 3,
+                          Verifying = 4, Previewing = 5 };
 
     bool IsBusy() const { return taskKind_.load() != 0; }
     bool IsScanning() const { return taskKind_.load() == static_cast<int>(TaskKind::Scanning); }
@@ -101,6 +102,26 @@ public:
     enum class UndoResult { Ok, NotReversible, DeleteType, Failed };
     UndoResult UndoRecord(const OpRecord& rec, std::wstring& errOut);
 
+    // ---- v2.8 read-only helpers on the worker ------------------------------
+    // Batch existence check for a tab's visible list ("deleted by hand in
+    // Explorer"). Completion posts WM_APP_VERIFY_DONE; the dead paths are
+    // then available via LastDeadPaths()/LastVerifyTab().
+    bool VerifyPathsAsync(TabId tab, std::vector<std::wstring> paths);
+    std::vector<std::wstring> LastDeadPaths() const;
+    TabId LastVerifyTab() const;
+
+    // GuardRails dry-run ("预览执行") over the checked rows. Completion posts
+    // WM_APP_PREVIEW_DONE; the report is in LastPreview(). The canonical-
+    // path resolution does real I/O per item — this used to freeze the UI.
+    struct PreviewReport {
+        int pass = 0;
+        int denied = 0;
+        std::wstring details;   // "⊘ title — reason" lines
+    };
+    bool PreviewAsync(TabId tab, std::vector<ScanItem> items,
+                      std::vector<size_t> selected);
+    const PreviewReport& LastPreview() const;
+
     // REVIEW P1-4 (04-R5 / 03-B10): batch undo on the worker thread — the
     // synchronous UI-thread version froze the window for the whole
     // (multi-GB) copy-back. Completion: WM_APP_OP_DONE, report in
@@ -146,6 +167,13 @@ private:
 
     mutable std::mutex reportMu_;
     ExecuteReport lastReport_;
+
+    // v2.8 verify / preview results (worker writes, UI reads on DONE).
+    mutable std::mutex verifyMu_;
+    std::vector<std::wstring> lastDead_;
+    TabId lastVerifyTab_ = TabId::Junk;
+    mutable std::mutex previewMu_;
+    PreviewReport lastPreview_;
 };
 
 } // namespace minisys
