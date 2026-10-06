@@ -91,6 +91,7 @@
     <ClCompile Include="tests\VolumeIndexTests.cpp" />
     <ClCompile Include="tests\DelegateOpTests.cpp" />
     <ClCompile Include="tests\DevBuildCacheTests.cpp" />
+    <ClCompile Include="tests\GuardRailsAdversarialTests.cpp" />
     <ClCompile Include="..\MiniSys\src\core\SessionService.cpp" />
     <ClCompile Include="..\MiniSys\src\core\Settings.cpp" />
     <ClCompile Include="..\MiniSys\src\core\PlanBuilder.cpp" />

@@ -196,6 +196,17 @@ bool GuardRails::Canonicalize(const std::wstring& in, std::wstring& out) {
     if (in.empty()) return false;
     out.clear();
 
+    // v2.12 (adversarial corpus): a bare drive letter ("C:") is
+    // drive-relative (CWD), which CreateFileW happily resolves to some
+    // arbitrary directory — read it CONSERVATIVELY as the volume root so
+    // the gate sees it as protected instead.
+    if (in.size() == 2 && in[1] == L':' &&
+        ((in[0] >= L'a' && in[0] <= L'z') ||
+         (in[0] >= L'A' && in[0] <= L'Z'))) {
+        out = std::wstring(1, in[0]) + L":\\";
+        return true;
+    }
+
     // 1) Final-path resolution for existing paths: expands 8.3 short names,
     //    "..", doubled separators, and strips \\?\-style prefixes. Open the
     //    reparse point itself (never traverse into a junction target).
@@ -236,19 +247,45 @@ bool GuardRails::Canonicalize(const std::wstring& in, std::wstring& out) {
         }
     }
 
-    // 2) Fallback for non-existing paths: pure string normalization. No
-    //    short-name expansion, but still collapses separators/.. and yields
-    //    an absolute path (relative to the process CWD).
+    // 2) Fallback for non-existing paths: pure string normalization, then
+    //    expand the LONGEST EXISTING ANCESTOR to its long form — otherwise
+    //    an 8.3 prefix ("C:\PROGRA~1\...") with a nonexistent tail smuggles
+    //    a protected target past the string comparison (v2.12 adversarial
+    //    corpus finding).
     wchar_t buf[MAX_PATH * 2];
     DWORD n = GetFullPathNameW(in.c_str(), MAX_PATH * 2, buf, nullptr);
     if (n == 0 || n >= MAX_PATH * 2) return false;
     out = buf;
-    // Best-effort long-name expansion when the path does exist.
-    wchar_t buf2[MAX_PATH * 2];
-    DWORD n2 = GetLongPathNameW(out.c_str(), buf2, MAX_PATH * 2);
-    if (n2 > 0 && n2 < MAX_PATH * 2) out = buf2;
+    {
+        fs::path cur = out;
+        std::wstring tail;   // nonexistent components below the ancestor
+        std::error_code ec;
+        for (; cur != cur.root_path(); cur = cur.parent_path()) {
+            if (fs::exists(cur, ec)) {
+                wchar_t lb[MAX_PATH * 2];
+                DWORD ln = GetLongPathNameW(cur.wstring().c_str(), lb,
+                                            MAX_PATH * 2);
+                if (ln > 0 && ln < MAX_PATH * 2 &&
+                    _wcsicmp(lb, cur.wstring().c_str()) != 0) {
+                    out = std::wstring(lb) + tail;
+                }
+                break;
+            }
+            std::wstring name = cur.filename().wstring();
+            if (!name.empty()) tail = L"\\" + name + tail;
+        }
+    }
     StripPrefix(out);
     return !out.empty();
+}
+
+// v2.12 (adversarial corpus): the volume root itself is never a legal
+// target — "C:\" / "D:\" (e.g. from a tampered results cache) used to pass
+// the subtree lists untouched.
+static bool IsDriveRootLower(const std::wstring& low) {
+    return low.size() >= 2 && low[1] == L':' &&
+           (low.size() == 2 ||
+            (low.size() == 3 && (low[2] == L'\\' || low[2] == L'/')));
 }
 
 bool GuardRails::IsProtectedPath(const fs::path& p) {
@@ -259,6 +296,7 @@ bool GuardRails::IsProtectedPath(const fs::path& p) {
         return true;   // UNC: no network file operations in this product
     }
     std::wstring low = ToLower(canon);
+    if (IsDriveRootLower(low)) return true;
 
     if (MatchAny(low, pol.fileExact)) return true;
     if (MatchAnySub(low, pol.fileSubtree)) {
@@ -275,6 +313,7 @@ bool GuardRails::IsProtectedMigrationSource(const fs::path& p) {
     if (!Canonicalize(p.wstring(), canon)) return true;
     if (canon.size() >= 2 && canon[0] == L'\\' && canon[1] == L'\\') return true;
     std::wstring low = ToLower(canon);
+    if (IsDriveRootLower(low)) return true;
     return MatchAny(low, pol.migExact) || MatchAnySub(low, pol.migSubtree);
 }
 

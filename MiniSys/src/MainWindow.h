@@ -81,6 +81,7 @@ private:
     void OnVerifyDone();                      // v2.8: worker verify results
     void OnPreviewDone();                     // v2.8: worker preview report
     void OnCommandPalette();                  // v2.10: Ctrl+K command palette
+    void OnDevCacheRoots();                   // v2.12: dev-cache roots editor
 };
 
 } // namespace minisys

@@ -762,6 +762,7 @@ void MainWindow::OnCommandPalette() {
     add(L"预览执行 — 安全闸检查", [this] { OnPreviewExecution(); });
     add(L"清空隔离区…", [this] { OnEmptyQuarantine(); });
     add(L"关于 MiniSys", [this] { OnAbout(); });
+    add(L"设置开发缓存扫描根…", [this] { OnDevCacheRoots(); });
 
     struct TabCmd { const wchar_t* name; TabId tab; };
     static const TabCmd kTabs[] = {
@@ -798,7 +799,182 @@ void MainWindow::OnCommandPalette() {
     palette::Show(hwnd_, cmds);
 }
 
-// v2.5 cached results: "上次扫描: …" provenance line, judged per tab.
+// v2.12: editor for the dev-build-cache scan roots (settings.json
+// "devCacheRoots" had no UI entry — hand-editing JSON is not a workflow).
+// Minimal modal dialog: multiline edit (one absolute path per line) +
+// browse + OK/Cancel. Auto-detected conventional roots always run in
+// addition to these.
+namespace {
+struct RootsDlgState {
+    std::wstring joined;   // ';'-separated result
+    bool ok = false;
+};
+
+LRESULT CALLBACK RootsDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+        case WM_COMMAND:
+            switch (LOWORD(w)) {
+                case IDOK: {
+                    auto* st = reinterpret_cast<RootsDlgState*>(
+                        GetWindowLongPtrW(h, GWLP_USERDATA));
+                    HWND edit = GetDlgItem(h, 1);
+                    int len = GetWindowTextLengthW(edit);
+                    std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+                    GetWindowTextW(edit, text.data(), len + 1);
+                    text.resize(len);
+                    std::wstring joined, cur;
+                    auto flush = [&] {
+                        if (!cur.empty()) {
+                            if (!joined.empty()) joined += L';';
+                            joined += cur;
+                        }
+                        cur.clear();
+                    };
+                    for (wchar_t ch : text) {
+                        if (ch == L'\n') flush;
+                        else if (ch != L'\r') cur += ch;
+                    }
+                    flush();
+                    st->joined = std::move(joined);
+                    st->ok = true;
+                    DestroyWindow(h);
+                    return 0;
+                }
+                case IDCANCEL:
+                    DestroyWindow(h);
+                    return 0;
+                case 100: {   // 浏览添加…（100：IDCANCEL 宏恰好等于 2）
+                    BROWSEINFOW bi{};
+                    bi.hwndOwner = h;
+                    bi.lpszTitle = L"选择一个代码根目录（如 D:\\projects）";
+                    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                    if (pidl) {
+                        wchar_t buf[MAX_PATH]{};
+                        if (SHGetPathFromIDListW(pidl, buf) && buf[0]) {
+                            HWND edit = GetDlgItem(h, 1);
+                            int len = GetWindowTextLengthW(edit);
+                            if (len > 0) {
+                                SendMessageW(edit, EM_SETSEL, len, len);
+                                SendMessageW(edit, EM_REPLACESEL, TRUE,
+                                             reinterpret_cast<LPARAM>(L"\r\n"));
+                            }
+                            SendMessageW(edit, EM_REPLACESEL, TRUE,
+                                         reinterpret_cast<LPARAM>(buf));
+                        }
+                        CoTaskMemFree(pidl);
+                    }
+                    return 0;
+                }
+            }
+            break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+} // namespace
+
+void MainWindow::OnDevCacheRoots() {
+    constexpr wchar_t kClass[] = L"MiniSysRootsDlg";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = &RootsDlgProc;
+        wc.hInstance = hInst_;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = kClass;
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    RECT or_{};
+    GetWindowRect(hwnd_, &or_);
+    const int W = UiScale(hwnd_, 520), H = UiScale(hwnd_, 300);
+    RootsDlgState st;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass,
+        L"开发构建缓存的额外扫描根目录",
+        WS_POPUPWINDOW | WS_CAPTION,
+        or_.left + ((or_.right - or_.left) - W) / 2,
+        or_.top + ((or_.bottom - or_.top) - H) / 3,
+        W, H, hwnd_, nullptr, hInst_, nullptr);
+    SetWindowLongPtrW(dlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
+    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    auto mk = [&](const wchar_t* cls, const wchar_t* text, DWORD style,
+                  int x, int y, int w, int h, int id) {
+        HWND c = CreateWindowExW(
+            wcscmp(cls, L"EDIT") == 0 ? WS_EX_CLIENTEDGE : 0, cls,
+            text, style, x, y, w, h, dlg,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), hInst_, nullptr);
+        SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        return c;
+    };
+    mk(L"STATIC", L"每行一个绝对路径（惯例目录 src/code/dev 等自动探测之外的额外根）：",
+       WS_CHILD | WS_VISIBLE, UiScale(hwnd_, 10), UiScale(hwnd_, 10),
+       W - UiScale(hwnd_, 30), UiScale(hwnd_, 18), 0);
+    std::wstring lines;
+    for (wchar_t ch : settings_.devCacheRoots) {
+        lines += (ch == L';') ? L'\n' : ch;
+    }
+    HWND edit = mk(L"EDIT", lines.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
+            WS_VSCROLL,
+        UiScale(hwnd_, 10), UiScale(hwnd_, 32), W - UiScale(hwnd_, 30),
+        H - UiScale(hwnd_, 100), 1);
+    mk(L"BUTTON", L"浏览添加…",
+       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+       UiScale(hwnd_, 10), H - UiScale(hwnd_, 60), UiScale(hwnd_, 110),
+       UiScale(hwnd_, 26), 100);
+    mk(L"BUTTON", L"确定",
+       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+       W - UiScale(hwnd_, 195), H - UiScale(hwnd_, 60), UiScale(hwnd_, 88),
+       UiScale(hwnd_, 26), IDOK);
+    mk(L"BUTTON", L"取消",
+       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+       W - UiScale(hwnd_, 100), H - UiScale(hwnd_, 60), UiScale(hwnd_, 90),
+       UiScale(hwnd_, 26), IDCANCEL);
+
+    EnableWindow(hwnd_, FALSE);   // modal
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(edit);
+
+    MSG msg;
+    while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(hwnd_, TRUE);
+    SetActiveWindow(hwnd_);
+
+    if (!st.ok) return;
+    // Validate: keep absolute existing directories only.
+    std::wstring kept;
+    std::wstring cur;
+    std::error_code ec;
+    size_t dropped = 0;
+    auto flush = [&] {
+        if (cur.empty()) return;
+        if (cur.size() >= 3 && cur[1] == L':' && cur[2] == L'\\' &&
+            std::filesystem::is_directory(std::filesystem::path(cur), ec)) {
+            if (!kept.empty()) kept += L';';
+            kept += cur;
+        } else {
+            ++dropped;
+        }
+        cur.clear();
+    };
+    for (wchar_t ch : st.joined) {
+        if (ch == L';') flush;
+        else cur += ch;
+    }
+    flush();
+    settings_.devCacheRoots = kept;
+    SaveSettings();
+    ShowHint(dropped
+        ? FormatW(L"✓ 已保存开发缓存扫描根（忽略了 %zu 个无效/不存在的路径）。", dropped)
+        : L"✓ 已保存开发缓存扫描根，下次垃圾清理扫描生效。");
+}
 std::wstring MainWindow::ComposeScanTimeLine() const {
     auto& svc = SessionService::Instance();
     uint64_t at = svc.LastScanAt(CurrentTab());

@@ -200,9 +200,19 @@ bool DelegateCommandAllowedImpl(const std::wstring& cmd, std::wstring& reason) {
         if (abs != e.exe) continue;
         for (size_t i = 0; i < e.prefixCount; ++i) {
             std::wstring p = ToLower(e.prefixes[i]);
-            if (p.empty() ? argsLow.empty()
-                          : (argsLow.size() >= p.size() &&
-                             argsLow.compare(0, p.size(), p) == 0)) {
+            // v2.12 (adversarial corpus): the prefix must end at a token
+            // boundary — "/Cleanup-Image\ncmd /c calc" used to pass as a
+            // prefix of "/Online /Cleanup-Image". A prefix that itself ends
+            // in whitespace ("/h ") already consumed its separator.
+            bool atBoundary = p.empty() || p.back() == L' ' || p.back() == L'\t' ||
+                              argsLow.size() == p.size() ||
+                              argsLow[p.size()] == L' ' ||
+                              argsLow[p.size()] == L'\t';
+            bool ok = p.empty() ? argsLow.empty()
+                                : (argsLow.size() >= p.size() &&
+                                   argsLow.compare(0, p.size(), p) == 0 &&
+                                   atBoundary);
+            if (ok) {
                 return true;
             }
         }
