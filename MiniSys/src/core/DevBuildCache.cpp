@@ -1,5 +1,6 @@
 #include "core/DevBuildCache.h"
 
+#include "util/DirSizeCache.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
@@ -222,10 +223,13 @@ void Scan(std::vector<ScanItem>& out,
         WIN32_FILE_ATTRIBUTE_DATA fad{};
         if (!GetFileAttributesExW(LongPath(f.path).c_str(),
                                   GetFileExInfoStandard, &fad)) continue;
-        auto size = DirectorySizeParallel(f.path, 2);
+        // v2.7: sizes go through the session-wide (path, mtime) cache so
+        // repeat scans skip unchanged artifact directories.
+        uint64_t mtime = FiletimeOf(fad);
+        auto size = DirSizeCache::Instance().SizeOf(f.path, mtime, 2);
         if (size == 0) continue;
         std::wstring name = f.path.filename().wstring();
-        EmitArtifact(f.path, name, FiletimeOf(fad) ? FiletimeOf(fad) : now,
+        EmitArtifact(f.path, name, mtime ? mtime : now,
                      IsCautiousArtifactName(name) && !IsSafeArtifactName(name),
                      size, out);
     }

@@ -3,6 +3,7 @@
 #include "core/DevBuildCache.h"
 #include "core/JunkRules.h"
 #include "core/VolumeIndex.h"
+#include "util/DirSizeCache.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
@@ -284,8 +285,12 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
                     if (cancel.load()) return;
                     size_t i = next.fetch_add(1);
                     if (i >= dirs.size()) return;
-                    dirs[i]->sizeBytes =
-                        DirectorySizeParallel(dirs[i]->path, /*numThreads=*/2);
+                    // v2.7: repeat scans reuse the subtree size when the
+                    // directory mtime is unchanged — the sizing pass is the
+                    // dominant rescan cost.
+                    dirs[i]->sizeBytes = DirSizeCache::Instance().SizeOf(
+                        dirs[i]->path, dirs[i]->lastWriteFiletime,
+                        /*numThreads=*/2);
                     size_t d = done.fetch_add(1) + 1;
                     {
                         std::lock_guard<std::mutex> g(pmu);

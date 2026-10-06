@@ -122,6 +122,7 @@
     <ClCompile Include="src\util\Json.cpp" />
     <ClCompile Include="src\util\PathUtils.cpp" />
     <ClCompile Include="src\util\StringUtils.cpp" />
+    <ClCompile Include="src\util\DirSizeCache.cpp" />
     <ClCompile Include="src\util\FastWalk.cpp" />
     <ClCompile Include="src\ui\Presenters.cpp" />
     <ClCompile Include="src\ui\Icons.cpp" />
@@ -161,6 +162,7 @@
     <ClInclude Include="src\util\Json.h" />
     <ClInclude Include="src\util\PathUtils.h" />
     <ClInclude Include="src\util\StringUtils.h" />
+    <ClInclude Include="src\util\DirSizeCache.h" />
     <ClInclude Include="src\util\FastWalk.h" />
     <ClInclude Include="src\ui\UiHandles.h" />
     <ClInclude Include="src\ui\Presenters.h" />

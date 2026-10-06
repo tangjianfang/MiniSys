@@ -43,6 +43,7 @@
 #define TIMER_SEARCH_DEBOUNCE       2
 #define TIMER_SEARCH_RETRY          3     // retry while a previous search drains
 #define TIMER_IDLE_REFRESH          4     // v2.5: idle-time background rescan
+#define TIMER_VERIFY_LIST           5     // v2.7: debounced focus-return verify
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)
 // Context menu on the list (REVIEW P2)
@@ -79,3 +80,4 @@
 #define IDM_QF_AUDIO        3022   // ext:mp3;flac;wav
 #define IDM_QF_DOC          3023   // ext:doc;docx;xls;xlsx;pdf
 #define IDM_QF_CLEAR        3024   // strip all filter tokens
+#define IDM_LIST_VERIFY     3025   // v2.7: verify rows, drop hand-deleted

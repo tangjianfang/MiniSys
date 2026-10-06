@@ -338,6 +338,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 case IDM_LIST_PREVIEW:   OnPreviewExecution(); break;
                 case IDM_LIST_EXCLUDE:   OnExcludeSelected(); break;
+                case IDM_LIST_VERIFY:    OnVerifyList(/*manual=*/true); break;
             }
             return 0;
         }
@@ -406,6 +407,17 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 // active tab's stale list in the background — the cache
                 // stays accurate without anyone asking.
                 OnIdleCheck();
+            } else if (wp == TIMER_VERIFY_LIST) {
+                KillTimer(hwnd_, TIMER_VERIFY_LIST);
+                OnVerifyList(/*manual=*/false);
+            }
+            return 0;
+        case WM_ACTIVATE:
+            // v2.7: coming back from Explorer after deleting things by
+            // hand — verify the visible list shortly (debounced; a one-shot
+            // timer so the activation burst doesn't run during redraw).
+            if (LOWORD(wp) != WA_INACTIVE && HIWORD(wp) == 0) {
+                SetTimer(hwnd_, TIMER_VERIFY_LIST, 400, nullptr);
             }
             return 0;
         case WM_CLOSE:
@@ -546,6 +558,27 @@ void MainWindow::OnQuickFilterMenu() {
         // Index still building (most common busy case here) — OnScanDone
         // re-applies the (now non-empty) query when it lands.
         ShowHint(L"ℹ 索引构建中，完成后将自动应用该筛选。");
+    }
+}
+
+// v2.7: sync the visible list with reality after out-of-tool deletions.
+// One attribute query per row — a full rescan is not needed to learn that
+// a path disappeared.
+void MainWindow::OnVerifyList(bool manual) {
+    if (taskMode_ != TaskMode::None) return;
+    auto t = CurrentTab();
+    if (t == TabId::History || t == TabId::FolderTree) {
+        if (manual) ShowHint(L"ℹ 本页无需校验。");
+        return;
+    }
+    auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
+    if (!lp) return;
+    size_t removed = lp->VerifyRows();
+    if (removed > 0) {
+        ShowHint(FormatW(L"ℹ 已移除 %zu 项（在磁盘上已不存在，可能已被手动删除）。", removed));
+        UpdateExecButton();
+    } else if (manual) {
+        ShowHint(L"✓ 列表已校验，未发现已删除的项目。");
     }
 }
 
@@ -1243,7 +1276,7 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.6";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.7";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
@@ -1420,6 +1453,9 @@ void MainWindow::OnListContextMenu() {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_PREVIEW,    L"预览执行（安全闸检查）…");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_EXCLUDE,    L"永不清理此项目");
+    // v2.7: hand-deleted rows — full rescan is ~30 s, existence-checking
+    // the current list is <100 ms.
+    AppendMenuW(hMenu, MF_STRING, IDM_LIST_VERIFY,     L"刷新列表（移除已手动删除的项）");
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                              pt.x, pt.y, 0, hwnd_, nullptr);
     DestroyMenu(hMenu);

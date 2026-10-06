@@ -113,6 +113,7 @@
     <ClCompile Include="..\MiniSys\src\util\Win32Error.cpp" />
     <ClCompile Include="..\MiniSys\src\util\PathUtils.cpp" />
     <ClCompile Include="..\MiniSys\src\util\StringUtils.cpp" />
+    <ClCompile Include="..\MiniSys\src\util\DirSizeCache.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

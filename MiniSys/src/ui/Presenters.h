@@ -64,6 +64,12 @@ public:
     // Indices (into the snapshot) of checked rows.
     std::vector<size_t> CollectChecked() const;
 
+    // v2.7: drop rows whose path no longer exists on disk (deleted outside
+    // the tool, e.g. by hand in Explorer). Cheap — one attribute query per
+    // row. Returns how many were removed; re-renders and syncs the
+    // service-side results when >0.
+    size_t VerifyRows();
+
     // REVIEW P1-1: the presenter renders from its own UI-private snapshot
     // — never from the worker-owned storage. Plans are built from it too.
     const std::vector<ScanItem>& Snapshot() const { return snapshot_; }

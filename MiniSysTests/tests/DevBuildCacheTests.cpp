@@ -1,11 +1,48 @@
 #include "core/DevBuildCache.h"
 #include "core/VolumeIndex.h"
+#include "util/DirSizeCache.h"
 
 #include <gtest/gtest.h>
 
+#include <windows.h>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace minisys {
+
+// ---- v2.7 directory-size cache ----------------------------------------------
+
+namespace {
+
+uint64_t MtimeOf(const std::filesystem::path& p) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fad)) return 0;
+    return (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+           static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+}
+
+} // namespace
+
+TEST(DirSizeCache, MtimeKeyControlsReuse) {
+    auto base = std::filesystem::temp_directory_path() /
+                (L"minisys-dsc-test-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code ec;
+    std::filesystem::remove_all(base, ec);
+    std::filesystem::create_directories(base);
+    {
+        std::ofstream f(base / L"a.txt", std::ios::binary);
+        f << "12345";   // 5 bytes
+    }
+    uint64_t mt = MtimeOf(base);
+    ASSERT_NE(mt, 0u);
+    EXPECT_EQ(DirSizeCache::Instance().SizeOf(base, mt, 0), 5u);
+    // Same (path, mtime) → served from the cache.
+    EXPECT_EQ(DirSizeCache::Instance().SizeOf(base, mt, 0), 5u);
+    // Different mtime → recomputed (same result, fresh walk).
+    EXPECT_EQ(DirSizeCache::Instance().SizeOf(base, mt + 100000, 0), 5u);
+    std::filesystem::remove_all(base, ec);
+}
 
 // ---- v2.5 dev build-artifact classification --------------------------------
 

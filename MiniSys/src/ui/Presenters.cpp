@@ -238,6 +238,39 @@ std::vector<size_t> ListTabPresenter::CollectChecked() const {
     return out;
 }
 
+// v2.7: "I deleted it by hand in Explorer — the list still shows it."
+// Instead of a full rescan, verify the CURRENT rows against the disk: one
+// GetFileAttributesEx per path (microseconds), ghosts removed, check state
+// preserved, service results synced so the next plan is consistent.
+size_t ListTabPresenter::VerifyRows() {
+    if (snapshot_.empty()) return 0;
+    CaptureCheckState();   // keep the user's explicit checks across the prune
+
+    std::vector<ScanItem> kept;
+    kept.reserve(snapshot_.size());
+    size_t removed = 0;
+    for (auto& it : snapshot_) {
+        // Recycle bin is a pseudo-item, not a path.
+        if (it.path == L"$RECYCLE.BIN") {
+            kept.push_back(std::move(it));
+            continue;
+        }
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(LongPath(it.path).c_str(),
+                                 GetFileExInfoStandard, &fad)) {
+            kept.push_back(std::move(it));
+        } else {
+            ++removed;
+        }
+    }
+    if (removed == 0) return 0;
+
+    snapshot_.swap(kept);
+    SessionService::Instance().StoreResults(tab_, snapshot_);
+    RenderItems();
+    return removed;
+}
+
 void ListTabPresenter::SortBySize() {
     // Column 3 = 大小 (REVIEW-UI P2 L-10: sortCol_ is the column index now).
     if (sortCol_ == 3) sortAsc_ = !sortAsc_;

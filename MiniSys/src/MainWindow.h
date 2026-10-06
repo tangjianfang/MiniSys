@@ -75,6 +75,7 @@ private:
     void OnIdleCheck();                       // v2.5: idle background rescan
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
     void OnQuickFilterMenu();                 // v2.6: search filter presets
+    void OnVerifyList(bool manual);           // v2.7: drop hand-deleted rows
 };
 
 } // namespace minisys
