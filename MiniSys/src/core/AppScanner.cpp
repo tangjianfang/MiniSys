@@ -4,6 +4,7 @@
 #include "util/Logger.h"
 
 #include <windows.h>
+#include <cstdint>
 #include <vector>
 #include <unordered_set>
 
@@ -137,11 +138,19 @@ void AppScanner::Scan(std::vector<ScanItem>& out,
         it.title    = a.displayName + (a.publisher.empty() ? L"" : (L" — " + a.publisher));
         it.path     = a.installLocation;
         it.sizeBytes = a.sizeBytesActual;
-        it.detail   = L"InstallLocation: " + a.installLocation;
+        it.detail   = L"安装位置: " + a.installLocation;
         if (!a.uninstallString.empty()) {
-            it.detail += L"\nUninstall: " + a.uninstallString;
+            it.detail += L"\n卸载命令: " + a.uninstallString;
         }
         it.recommended = false;
+        // REVIEW P1-9 (05-T-B5): migration channel mtime snapshot.
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(LongPath(a.installLocation).c_str(),
+                                 GetFileExInfoStandard, &fad)) {
+            it.lastWriteFiletime =
+                (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+                static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+        }
         out.push_back(std::move(it));
     }
 }

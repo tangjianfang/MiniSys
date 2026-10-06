@@ -32,12 +32,24 @@
 
 // History tab
 #define IDC_BTN_EMPTY_Q             2018  // 清空隔离区
+#define IDC_BTN_ABOUT               2019  // 关于
+
+// Accelerators (keyboard navigation, REVIEW P2)
+#define IDC_ACCEL_SELECTALL         2090  // Ctrl+A — toggle all rows
+// Context menu on the list (REVIEW P2)
+#define IDM_LIST_OPEN               3002
+#define IDM_LIST_INFO               3003
+#define IDM_LIST_SELECTALL          3004
+#define IDM_LIST_SELECTNONE         3005
+#define IDM_LIST_PREVIEW            3006
+#define IDM_LIST_EXCLUDE            3007
 
 // Custom messages
 #define WM_APP_SCAN_PROGRESS        (WM_APP + 1)
 #define WM_APP_SCAN_DONE            (WM_APP + 2)
 #define WM_APP_OP_DONE              (WM_APP + 3)
 #define WM_APP_OP_PROGRESS          (WM_APP + 4)
+#define WM_APP_TASK_STARTED         (WM_APP + 5)  // any ExecutePlan start
 
 // Context menu
 #define IDM_CTX_DELETE              3001

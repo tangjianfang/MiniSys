@@ -5,16 +5,35 @@
 
 namespace minisys {
 
+namespace {
+// REVIEW P3 (07-X18): fixed pixel constants declared PerMonitorV2-aware but
+// never scaled — at 150% the buttons stayed 30 px and icons 16 px. All
+// layout metrics scale with the window DPI now.
+int Scale(int v, UINT dpi) { return v * static_cast<int>(dpi) / 96; }
+}
+
 void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
+    UINT dpi = 96;
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using Fn = UINT(WINAPI*)(HWND);
+        if (auto fn = reinterpret_cast<Fn>(GetProcAddress(user32, "GetDpiForWindow"))) {
+            dpi = fn(ui.main);
+        }
+    }
+
     SendMessageW(ui.status, WM_SIZE, 0, 0);
     RECT srect; GetClientRect(ui.status, &srect);
     int statusH = srect.bottom - srect.top;
 
-    constexpr int pad = 8;
-    constexpr int btnH = 30;
-    constexpr int btnW = 140;
-    int tabH = 28;
+    const int pad = Scale(8, dpi);
+    const int btnH = Scale(30, dpi);
+    const int btnW = Scale(140, dpi);
+    int tabH = Scale(28, dpi);
     SetWindowPos(ui.tab, nullptr, 0, 0, W, tabH, SWP_NOZORDER);
+
+    // About button: top-right on the tab strip (classic help placement,
+    // clear of the crowded Apps-tab button row).
+    SetWindowPos(ui.about, nullptr, W - Scale(84, dpi), 1, Scale(80, dpi), tabH - 2, SWP_NOZORDER);
 
     int btnY = tabH + pad;
     SetWindowPos(ui.scan,        nullptr, pad,                     btnY, btnW, btnH, SWP_NOZORDER);
@@ -28,17 +47,17 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
     SetWindowPos(ui.btnSortTime, nullptr, pad + 5*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
 
     // LargeFiles settings row — only rendered when LargeFiles tab is active.
-    constexpr int editH   = 24;
-    constexpr int lblH    = 22;
+    const int editH = Scale(24, dpi);
+    const int lblH  = Scale(22, dpi);
     int settingsRowH = showSettings ? (editH + pad) : 0;
 
     if (showSettings) {
-        constexpr int editW   = 70;
-        constexpr int editW2  = 200;
-        constexpr int editW3  = 80;
-        constexpr int lblW1   = 76;
-        constexpr int lblW2   = 150;
-        constexpr int lblW3   = 190;
+        const int editW   = Scale(70, dpi);
+        const int editW2  = Scale(200, dpi);
+        const int editW3  = Scale(80, dpi);
+        const int lblW1   = Scale(76, dpi);
+        const int lblW2   = Scale(150, dpi);
+        const int lblW3   = Scale(190, dpi);
         int settingsY = btnY + btnH + pad;
         int sx = pad;
         SetWindowPos(ui.lblMinSize,     nullptr, sx,                  settingsY+1, lblW1, lblH, SWP_NOZORDER);
@@ -53,17 +72,19 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings) {
     }
 
     int infoY = btnY + btnH + pad + settingsRowH;
-    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, 20, SWP_NOZORDER);
+    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, Scale(36, dpi), SWP_NOZORDER);
 
-    int contentY = infoY + 24;
+    int contentY = infoY + Scale(40, dpi);
     int contentH = H - contentY - pad;
     SetWindowPos(ui.list, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
     SetWindowPos(ui.tree, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
 
-    // Progress bar: over the right side of the status bar area.
-    int sbTop = H;  // status bar starts at H (below content)
-    int prgW = 220, prgH = statusH - 4;
-    SetWindowPos(ui.progress, nullptr, W - prgW - 4, sbTop + 2, prgW, prgH, SWP_NOZORDER);
+    // v2.2 (REVIEW P0-5 / 07-X8): the old position (y = H + 2) placed the
+    // bar BELOW the client area — the progress bar has never been visible
+    // since v1. Sit it just above the status bar instead.
+    int prgW = Scale(220, dpi), prgH = statusH - 4;
+    SetWindowPos(ui.progress, nullptr, W - prgW - 4,
+                 H - statusH - prgH - 4, prgW, prgH, SWP_NOZORDER);
 }
 
 } // namespace minisys

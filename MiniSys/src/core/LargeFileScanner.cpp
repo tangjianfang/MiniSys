@@ -42,7 +42,7 @@ std::wstring CategoryFor(const std::wstring& ext) {
 
 std::vector<fs::path> DefaultExcludes() {
     auto sd = SystemDriveRoot();
-    return {
+    std::vector<fs::path> v = {
         fs::path(sd) / L"Windows",
         fs::path(sd) / L"Program Files",
         fs::path(sd) / L"Program Files (x86)",
@@ -52,6 +52,12 @@ std::vector<fs::path> DefaultExcludes() {
         fs::path(sd) / L"$WinREAgent",
         fs::path(sd) / L"Recovery",
     };
+    // REVIEW P1-8 (03-B16): quarantined content reappeared in the large-
+    // files list as deletable candidates — exclude every quarantine root.
+    for (const auto& drive : EnumerateDrives()) {
+        v.push_back(fs::path(drive) / L"MiniSys.Quarantine");
+    }
+    return v;
 }
 
 std::vector<fs::path> DefaultRoots() {
@@ -186,7 +192,7 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
     }
 
     if (cfg_.detectDuplicates && entries.size() >= 2) {
-        if (progress) progress(0, 0, L"Grouping by size...");
+        if (progress) progress(0, 0, L"按大小分组…");
 
         std::unordered_map<unsigned long long, std::vector<size_t>> bySize;
         bySize.reserve(entries.size() * 2);
@@ -202,7 +208,7 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
         if (candidates.empty()) return;
 
         if (progress) {
-            progress(0, 0, FormatW(L"Pre-hashing %zu candidates (head 64KB)...", candidates.size()));
+            progress(0, 0, FormatW(L"预哈希 %zu 个候选（头 64KB）…", candidates.size()));
         }
         std::vector<std::wstring> headHashes;
         ParallelHash(candidates, entries, headHashes,
@@ -224,7 +230,7 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
         std::vector<std::wstring> fullHashes;
         if (!stage2Indices.empty()) {
             if (progress) {
-                progress(0, 0, FormatW(L"Full-hashing %zu duplicate candidates...", stage2Indices.size()));
+                progress(0, 0, FormatW(L"全量哈希 %zu 个重复候选…", stage2Indices.size()));
             }
             ParallelHash(stage2Indices, entries, fullHashes,
                 [](const fs::path& p) { return Sha256OfFile(p); },
@@ -251,9 +257,10 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
                 it.title       = en.path.filename().wstring();
                 it.path        = en.path;
                 it.sizeBytes   = en.size;
-                it.detail      = (gi == 0 ? L"[KEEP] " : L"[DELETE] ")
+                it.detail      = (gi == 0 ? L"[保留] " : L"[待删] ")
                                  + en.path.parent_path().wstring()
                                  + L"  sha256:" + hash.substr(0, 16);
+                it.lastWriteFiletime = en.mtime;   // REVIEW P1-9 (05-T-B5)
                 it.recommended = (gi != 0);
                 it.groupKey    = groupKey;
                 out.push_back(std::move(it));

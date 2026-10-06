@@ -77,7 +77,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\third_party\googletest\src\gtest-all.cc" />
-    <ClCompile Include="..\third_party\googletest\src\gtest_main.cc" />
+    
+    <ClCompile Include="tests\main.cpp" />
     <ClCompile Include="tests\SessionServiceTests.cpp" />
     <ClCompile Include="tests\ScanItemTests.cpp" />
     <ClCompile Include="tests\JsonTests.cpp" />
@@ -86,9 +87,11 @@
     <ClCompile Include="tests\QuarantineOpTests.cpp" />
     <ClCompile Include="tests\OperationLogTests.cpp" />
     <ClCompile Include="tests\JunkRulesTests.cpp" />
+    <ClCompile Include="tests\GuardRailsP0Tests.cpp" />
     <ClCompile Include="tests\VolumeIndexTests.cpp" />
     <ClCompile Include="tests\DelegateOpTests.cpp" />
     <ClCompile Include="..\MiniSys\src\core\SessionService.cpp" />
+    <ClCompile Include="..\MiniSys\src\core\Settings.cpp" />
     <ClCompile Include="..\MiniSys\src\core\PlanBuilder.cpp" />
     <ClCompile Include="..\MiniSys\src\core\GuardRails.cpp" />
     <ClCompile Include="..\MiniSys\src\core\QuarantineOp.cpp" />
@@ -99,10 +102,13 @@
     <ClCompile Include="..\MiniSys\src\core\MoveJunctionOp.cpp" />
     <ClCompile Include="..\MiniSys\src\core\OperationLog.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Junction.cpp" />
+    <ClCompile Include="..\MiniSys\src\platform\RestartManager.cpp" />
+    <ClCompile Include="..\MiniSys\src\platform\SystemRestore.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Privilege.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Hash.cpp" />
     <ClCompile Include="..\MiniSys\src\util\Json.cpp" />
     <ClCompile Include="..\MiniSys\src\util\Logger.cpp" />
+    <ClCompile Include="..\MiniSys\src\util\Win32Error.cpp" />
     <ClCompile Include="..\MiniSys\src\util\PathUtils.cpp" />
     <ClCompile Include="..\MiniSys\src\util\StringUtils.cpp" />
   </ItemGroup>

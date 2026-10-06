@@ -66,8 +66,11 @@ public:
     std::wstring QuarantineUsageText() const;
 
     // ---- results ---------------------------------------------------------
-    const std::vector<ScanItem>& Results(TabId tab) const;
-    std::vector<ScanItem>&       MutableResults(TabId tab);
+    // REVIEW P1-1 (04-R1): returns a COPY under a lock — the UI used to hold
+    // a live reference to the worker-owned vector across message loops.
+    std::vector<ScanItem> Results(TabId tab) const;
+    // UI-idle-only live access (render/sort while no task is running).
+    std::vector<ScanItem>& MutableResults(TabId tab);
 
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
@@ -75,6 +78,12 @@ public:
     // ---- undo ------------------------------------------------------------
     enum class UndoResult { Ok, NotReversible, DeleteType, Failed };
     UndoResult UndoRecord(const OpRecord& rec, std::wstring& errOut);
+
+    // REVIEW P1-4 (04-R5 / 03-B10): batch undo on the worker thread — the
+    // synchronous UI-thread version froze the window for the whole
+    // (multi-GB) copy-back. Completion: WM_APP_OP_DONE, report in
+    // LastReport(); per-record failures listed in details.
+    bool UndoRecordsAsync(const std::vector<OpRecord>& records);
 
     // Cancels and joins any running task (call before the window goes away).
     void Shutdown();
@@ -91,7 +100,7 @@ private:
     void RunEmptyQuarantine(HWND hwnd);
 
     void SetProgress(const std::wstring& text);
-    void Post(HWND hwnd, UINT msg);
+    void Post(HWND hwnd, UINT msg, WPARAM wp = 0);
 
     HWND hwnd_ = nullptr;
     std::thread worker_;
@@ -99,6 +108,7 @@ private:
     std::atomic<bool> cancelScan_{false};
     mutable std::mutex progressMu_;
     std::wstring progressText_;
+    mutable std::mutex resultsMu_;          // REVIEW P1-1
     std::vector<std::vector<ScanItem>> results_;   // indexed by TabId
 
     mutable std::mutex reportMu_;

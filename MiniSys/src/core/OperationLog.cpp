@@ -223,24 +223,46 @@ void OperationLog::Append(const OpRecord& rec) {
 
 void OperationLog::UpdateStatus(const std::wstring& id, OpStatus status,
                                 const std::wstring& note) {
-    auto all = LoadAll();   // newest first
-    {
-        std::lock_guard<std::mutex> g(mu_);
-        // Records were loaded newest-first; rewrite oldest-first to preserve
-        // original order.
-        std::vector<OpRecord> oldestFirst(all.rbegin(), all.rend());
-        for (auto& r : oldestFirst) {
+    std::lock_guard<std::mutex> g(mu_);
+    // REVIEW P1-2 (05-T-C5): the load used to happen OUTSIDE the lock — a
+    // concurrent Append in the window would be silently dropped by the
+    // rewrite. Load and rewrite now share one critical section.
+    std::vector<OpRecord> oldestFirst = LoadAllLocked();
+    std::reverse(oldestFirst.begin(), oldestFirst.end());
+    for (auto& r : oldestFirst) {
+        if (r.id == id) {
+            r.status = status;
+            if (!note.empty()) r.note = note;
+        }
+    }
+    RewriteAtomic(JsonlPath(), oldestFirst);
+}
+
+void OperationLog::UpdateStatusBulk(const std::vector<std::wstring>& ids,
+                                    OpStatus status, const std::wstring& note) {
+    if (ids.empty()) return;
+    std::lock_guard<std::mutex> g(mu_);
+    std::vector<OpRecord> oldestFirst = LoadAllLocked();
+    std::reverse(oldestFirst.begin(), oldestFirst.end());
+    for (auto& r : oldestFirst) {
+        for (const auto& id : ids) {
             if (r.id == id) {
                 r.status = status;
                 if (!note.empty()) r.note = note;
+                break;
             }
         }
-        RewriteAtomic(JsonlPath(), oldestFirst);
     }
+    RewriteAtomic(JsonlPath(), oldestFirst);
 }
 
 std::vector<OpRecord> OperationLog::LoadAll() {
     std::lock_guard<std::mutex> g(mu_);
+    return LoadAllLocked();
+}
+
+// Lock-free core of LoadAll (caller holds mu_).
+std::vector<OpRecord> OperationLog::LoadAllLocked() {
     std::vector<OpRecord> out;
     for (const auto& line : ReadAllLines(JsonlPath())) {
         OpRecord r;
@@ -255,8 +277,7 @@ std::vector<OpRecord> OperationLog::LoadAll() {
     return out;
 }
 
-std::wstring OperationLog::NewId() {
-    static std::atomic<unsigned long long> counter{0};
+std::wstring OperationLog::NewId() {    static std::atomic<unsigned long long> counter{0};
     SYSTEMTIME st; GetLocalTime(&st);
     wchar_t buf[64];
     swprintf_s(buf, L"%04d%02d%02d-%02d%02d%02d-%llu",

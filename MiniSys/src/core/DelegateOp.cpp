@@ -5,7 +5,9 @@
 #include "util/StringUtils.h"
 
 #include <windows.h>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace minisys {
 
@@ -72,6 +74,16 @@ bool DelegateOp::Execute(std::wstring& errOut) {
     }
     SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
 
+    // REVIEW P1-4 (03-B9): a job object with KILL_ON_JOB_CLOSE guarantees
+    // the child (and its own children, e.g. DismHost) die with us instead
+    // of outliving the app as orphans.
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    bool jobOk = job != nullptr &&
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                &jeli, sizeof(jeli));
+
     STARTUPINFOW si{ sizeof(si) };
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = outWrite;
@@ -87,31 +99,75 @@ bool DelegateOp::Execute(std::wstring& errOut) {
     CloseHandle(outWrite);   // child owns its end now
     if (!ok) {
         CloseHandle(outRead);
+        if (jobOk) CloseHandle(job);
         errOut = FormatW(L"无法启动 %s (Win32 %lu)", exe.c_str(), GetLastError());
         rec_.status = OpStatus::Failed;
         rec_.note = errOut;
         OperationLog::Instance().Append(rec_);
         return false;
     }
+    if (jobOk) {
+        AssignProcessToJobObject(job, pi.hProcess);
+    }
 
-    // Drain the pipe while the child runs so it never blocks on a full pipe.
+    // REVIEW P1-4 (03-B9): the child is drained on a reader THREAD and the
+    // process waited with a bounded poll — an interactive child (cleanmgr)
+    // or a grandchild holding the pipe write end can no longer wedge the
+    // worker forever; the job object tears everything down at the timeout.
     std::wstring output;
-    char pipe[4096];
-    DWORD n = 0;
-    for (;;) {
-        if (!ReadFile(outRead, pipe, sizeof(pipe), &n, nullptr) || n == 0) break;
-        output += Utf8ToWide(std::string(pipe, n));
-        if (output.size() > 64 * 1024) {
-            output = output.substr(output.size() - 32 * 1024);   // keep the tail
+    std::mutex outMu;
+    HANDLE readDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::thread reader([outRead, &output, &outMu, readDone]() {
+        std::wstring local;
+        char pipeBuf[4096];
+        DWORD n = 0;
+        for (;;) {
+            if (!ReadFile(outRead, pipeBuf, sizeof(pipeBuf), &n, nullptr) || n == 0) break;
+            local += Utf8ToWide(std::string(pipeBuf, n));
+            if (local.size() > 64 * 1024) {
+                local = local.substr(local.size() - 32 * 1024);   // keep the tail
+            }
+        }
+        {
+            std::lock_guard<std::mutex> g(outMu);
+            output = std::move(local);
+        }
+        SetEvent(readDone);
+    });
+
+    // DISM component cleanup can legitimately take tens of minutes — the
+    // bound only catches genuinely hung commands.
+    constexpr DWORD kTimeoutMs = 30ull * 60ull * 1000ull;
+    DWORD waited = 0;
+    bool exited = false;
+    while (waited < kTimeoutMs) {
+        if (WaitForSingleObject(pi.hProcess, 500) == WAIT_OBJECT_0) { exited = true; break; }
+        waited += 500;
+    }
+    if (!exited) {
+        if (jobOk) TerminateJobObject(job, 1);
+        else TerminateProcess(pi.hProcess, 1);
+    }
+    // Give the reader a moment to see EOF after (forced) exit, then detach
+    // if a grandchild still holds the write end — the job kill closes it.
+    if (WaitForSingleObject(readDone, 3000) == WAIT_OBJECT_0) {
+        reader.join();
+    } else {
+        CancelIoEx(outRead, nullptr);
+        if (WaitForSingleObject(readDone, 2000) == WAIT_OBJECT_0) {
+            reader.join();
+        } else {
+            reader.detach();   // thread exits soon after the handle closes
         }
     }
     CloseHandle(outRead);
+    CloseHandle(readDone);
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exitCode = 1;
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    if (jobOk) CloseHandle(job);
 
     if (exitCode != 0) {
         // Keep the last few output lines as the failure summary.

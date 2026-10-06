@@ -25,6 +25,12 @@ public:
     void UpdateStatus(const std::wstring& id, OpStatus status,
                       const std::wstring& note = {});
 
+    // REVIEW P1-7 (03-B7): bulk variant — the per-record loop re-read and
+    // re-wrote the whole file N times (O(N²)); this loads once, rewrites
+    // once. Records not found in `ids` keep their status/note.
+    void UpdateStatusBulk(const std::vector<std::wstring>& ids,
+                          OpStatus status, const std::wstring& note);
+
     // Load all records (newest first). Reads JSONL and legacy TSV lines.
     std::vector<OpRecord> LoadAll();
 
@@ -40,6 +46,8 @@ public:
 private:
     OperationLog() = default;
     std::mutex mu_;
+
+    std::vector<OpRecord> LoadAllLocked();   // caller holds mu_
 
     static std::filesystem::path JsonlPath();
     static std::filesystem::path LegacyTsvPath();

@@ -31,6 +31,9 @@ public:
     // Pre-flight checks (no side effects). Returns empty string on OK,
     // otherwise a human-readable message describing the blocker.
     std::wstring PreflightCheck() const;
+    // REVIEW P1-3 (03-B12): internal variant that also returns the source
+    // subtree size it already computed, so Execute doesn't walk twice.
+    std::wstring PreflightCheckImpl(unsigned long long& srcSizeOut) const;
 
 private:
     std::filesystem::path source_;

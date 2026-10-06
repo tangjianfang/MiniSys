@@ -2,9 +2,11 @@
 
 #include "core/GuardRails.h"
 #include "core/OperationLog.h"
+#include "platform/RestartManager.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
+#include "util/Win32Error.h"
 
 #include <windows.h>
 
@@ -14,18 +16,43 @@ namespace minisys {
 
 namespace {
 
-std::wstring LastErr(const wchar_t* prefix) {
-    DWORD e = GetLastError();
-    return std::wstring(prefix) + L" (Win32 " + std::to_wstring(e) + L")";
+// REVIEW P1-2 (03-B6 / 05-T-B7): real retry with back-off for the transient
+// lock errors, then a Restart Manager diagnosis so the failure message names
+// the culprit instead of "Win32 5".
+bool MoveWithRetry(const fs::path& from, const fs::path& to,
+                   std::wstring& err, unsigned long* lastError) {
+    constexpr int kAttempts = 3;
+    constexpr DWORD kDelaysMs[kAttempts - 1] = { 150, 400 };
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        if (MoveFileExW(LongPath(from).c_str(), LongPath(to).c_str(),
+                        MOVEFILE_WRITE_THROUGH)) {
+            return true;
+        }
+        *lastError = GetLastError();
+        DWORD e = *lastError;
+        bool transient = (e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION);
+        if (!transient || attempt == kAttempts - 1) break;
+        Sleep(kDelaysMs[attempt]);
+    }
+    err = FormatW(L"无法移动（Win32 %lu）", *lastError);
+    return false;
 }
 
-bool MoveWithRetry(const fs::path& from, const fs::path& to, std::wstring& err) {
-    if (MoveFileExW(LongPath(from).c_str(), LongPath(to).c_str(),
-                    MOVEFILE_WRITE_THROUGH)) {
-        return true;
+std::wstring DiagnoseLock(const fs::path& source, unsigned long lastError) {
+    if (lastError != ERROR_ACCESS_DENIED && lastError != ERROR_SHARING_VIOLATION) {
+        return Win32ErrorText(lastError);
     }
-    err = LastErr(L"MoveFileEx failed");
-    return false;
+    auto holders = LockingProcesses(source);
+    if (holders.empty()) {
+        return Win32ErrorText(lastError);
+    }
+    std::wstring list;
+    for (size_t i = 0; i < holders.size() && i < 5; ++i) {
+        if (i) list += L"、";
+        list += holders[i];
+    }
+    if (holders.size() > 5) list += L" 等";
+    return L"文件正被 " + list + L" 占用，关闭这些程序后重试（或重启电脑后立即执行）。";
 }
 
 } // namespace
@@ -81,8 +108,12 @@ bool QuarantineOp::Execute(std::wstring& errOut) {
 
     auto target = UniqueTargetFor(source_);
     std::wstring err;
-    if (!MoveWithRetry(source_, target, err)) {
-        errOut = err;
+    unsigned long lastError = 0;
+    if (!MoveWithRetry(source_, target, err, &lastError)) {
+        // REVIEW P1-2: explain WHY in human terms (occupying processes or
+        // the matching advice for the error class).
+        errOut = DiagnoseLock(source_, lastError) +
+                 FormatW(L"（Win32 %lu）", lastError);
         rec_.status = OpStatus::Failed;
         rec_.note = errOut;
         OperationLog::Instance().Append(rec_);
@@ -112,9 +143,17 @@ bool QuarantineOp::UndoPaths(const std::wstring& recordId,
         // Original path was recreated meanwhile — don't clobber it.
         restoreTo = fs::path(source.wstring() + L".restored");
     }
+    // REVIEW P1-4 (05-T-B6): undo used to bypass every gate — at minimum
+    // never restore INTO a protected system path.
+    if (GuardRails::IsProtectedPath(restoreTo)) {
+        errOut = L"还原目标位于受保护系统路径，已拒绝: " + restoreTo.wstring();
+        return false;
+    }
     std::wstring err;
-    if (!MoveWithRetry(quarantinePath, restoreTo, err)) {
-        errOut = err;
+    unsigned long lastError = 0;
+    if (!MoveWithRetry(quarantinePath, restoreTo, err, &lastError)) {
+        errOut = DiagnoseLock(quarantinePath, lastError) +
+                 FormatW(L"（Win32 %lu）", lastError);
         return false;
     }
     if (!recordId.empty()) {

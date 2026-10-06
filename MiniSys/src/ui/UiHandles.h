@@ -30,6 +30,7 @@ struct UiHandles {
     HWND editDrives = nullptr;
     HWND btnSortSize = nullptr;  // sort buttons
     HWND btnSortTime = nullptr;
+    HWND about = nullptr;        // 关于 button (always visible, right-aligned)
 };
 
 } // namespace minisys

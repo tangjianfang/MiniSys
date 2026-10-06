@@ -7,6 +7,18 @@
 #include <objbase.h>
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    // REVIEW P2 (08-F13): single instance — two elevated copies racing the
+    // quarantine area and the history file is a real foot-gun.
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\MiniSys.SingleInstance");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowW(L"MiniSysMainWnd", nullptr);
+        if (existing) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        return 0;
+    }
+
     HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     SetProcessDPIAware();
     minisys::InstallCrashHandler();

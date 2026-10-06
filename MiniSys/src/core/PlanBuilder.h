@@ -27,6 +27,7 @@ struct CleanPlan {
     // Apps-tab migration context (empty for other tabs).
     std::wstring migrateTargetRoot;
     bool useSymlink = false;
+    bool createRestorePoint = false;   // REVIEW P3 (08-F8)
 };
 
 class PlanBuilder {

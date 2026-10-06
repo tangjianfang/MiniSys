@@ -122,7 +122,11 @@ std::wstring Json::Dump() const {
 
 class Json::Parser {
 public:
-    explicit Parser(const std::wstring& text) : s_(text) {}
+    explicit Parser(std::wstring text) : s_(std::move(text)) {
+        // Strip a UTF-8 BOM if the caller passed one through (v2.2: a BOM
+        // used to fail parsing at offset 0 with a confusing message).
+        if (!s_.empty() && s_[0] == static_cast<wchar_t>(0xFEFF)) s_.erase(0, 1);
+    }
 
     bool Parse(Json& out, std::wstring& err) {
         SkipWs();
@@ -136,6 +140,11 @@ public:
     }
 
 private:
+    // REVIEW P0-3 (05-T-C2a): recursion used to be unbounded — a corrupted
+    // rules.json with 10k '[' crashed the process with a stack overflow
+    // (0xC00000FD). Depth is capped well above any legitimate document.
+    static constexpr int kMaxDepth = 64;
+
     void SkipWs() {
         while (pos_ < s_.size() &&
                (s_[pos_] == L' ' || s_[pos_] == L'\t' || s_[pos_] == L'\r' ||
@@ -150,6 +159,7 @@ private:
     }
 
     bool ParseValue(Json& out) {
+        if (depth_ >= kMaxDepth) return Fail(L"nesting too deep");
         if (pos_ >= s_.size()) return Fail(L"unexpected end");
         wchar_t c = s_[pos_];
         if (c == L'{') return ParseObject(out);
@@ -170,6 +180,8 @@ private:
         out = Json::Object();
         SkipWs();
         if (pos_ < s_.size() && s_[pos_] == L'}') { ++pos_; return true; }
+        ++depth_;
+        struct Guard { int& d; ~Guard() { --d; } } g{ depth_ };
         for (;;) {
             SkipWs();
             if (pos_ >= s_.size() || s_[pos_] != L'"')
@@ -180,12 +192,17 @@ private:
             if (pos_ >= s_.size() || s_[pos_] != L':')
                 return Fail(L"expected ':'");
             ++pos_;
+            // REVIEW P0-3 (03-B4 / 05-T-C1): whitespace between ':' and the
+            // value was not skipped — the shipped rules.json ("version": 2)
+            // failed with "bad number at offset 14" and the external rule
+            // table never loaded once.
+            SkipWs();
             Json val;
             if (!ParseValue(val)) return false;
             out.Set(std::move(key), std::move(val));
             SkipWs();
             if (pos_ >= s_.size()) return Fail(L"unterminated object");
-            if (s_[pos_] == L',') { ++pos_; continue; }
+            if (s_[pos_] == L',') { ++pos_; SkipWs(); continue; }
             if (s_[pos_] == L'}') { ++pos_; return true; }
             return Fail(L"expected ',' or '}'");
         }
@@ -196,7 +213,12 @@ private:
         out = Json::Array();
         SkipWs();
         if (pos_ < s_.size() && s_[pos_] == L']') { ++pos_; return true; }
+        ++depth_;
+        struct Guard { int& d; ~Guard() { --d; } } g{ depth_ };
         for (;;) {
+            // REVIEW P0-3: array elements after ',' need the same whitespace
+            // skip as object values.
+            SkipWs();
             Json val;
             if (!ParseValue(val)) return false;
             out.Push(std::move(val));
@@ -286,20 +308,41 @@ private:
     }
 
     bool ParseNumber(Json& out) {
+        // REVIEW P0-3 (05-T-C2): the old scanner greedily consumed
+        // [0-9.eE+-] and let stod accept any valid prefix — "1.2.3" parsed
+        // as 1.2 silently. Grammar is now validated in full:
+        //   '-'? int frac? exp?   with int = '0' | [1-9][0-9]*
         size_t start = pos_;
-        if (pos_ < s_.size() && (s_[pos_] == L'-' || s_[pos_] == L'+')) ++pos_;
-        bool any = false;
-        while (pos_ < s_.size() &&
-               ((s_[pos_] >= L'0' && s_[pos_] <= L'9') || s_[pos_] == L'.' ||
-                s_[pos_] == L'e' || s_[pos_] == L'E' ||
-                s_[pos_] == L'-' || s_[pos_] == L'+')) {
+        if (pos_ < s_.size() && s_[pos_] == L'-') ++pos_;   // leading '+' invalid
+        auto digits = [&]() -> int {
+            int n = 0;
+            while (pos_ < s_.size() && s_[pos_] >= L'0' && s_[pos_] <= L'9') {
+                ++pos_; ++n;
+            }
+            return n;
+        };
+        if (pos_ < s_.size() && s_[pos_] == L'0') {
             ++pos_;
-            any = true;
+            if (pos_ < s_.size() && s_[pos_] >= L'0' && s_[pos_] <= L'9') {
+                return Fail(L"leading zero in number");
+            }
+        } else if (digits() == 0) {
+            return Fail(L"bad number");
         }
-        if (!any) return Fail(L"bad number");
+        if (pos_ < s_.size() && s_[pos_] == L'.') {
+            ++pos_;
+            if (digits() == 0) return Fail(L"bad number");
+        }
+        if (pos_ < s_.size() && (s_[pos_] == L'e' || s_[pos_] == L'E')) {
+            ++pos_;
+            if (pos_ < s_.size() && (s_[pos_] == L'+' || s_[pos_] == L'-')) ++pos_;
+            if (digits() == 0) return Fail(L"bad number");
+        }
+        std::wstring token = s_.substr(start, pos_ - start);
         try {
             size_t end = 0;
-            double d = std::stod(s_.substr(start, pos_ - start), &end);
+            double d = std::stod(token, &end);
+            if (end != token.size()) return Fail(L"bad number");
             out = Json(d);
             return true;
         } catch (...) {
@@ -307,8 +350,9 @@ private:
         }
     }
 
-    const std::wstring& s_;
+    std::wstring s_;
     size_t pos_ = 0;
+    int depth_ = 0;
     std::wstring err_;
 };
 

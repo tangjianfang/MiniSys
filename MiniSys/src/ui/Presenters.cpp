@@ -17,6 +17,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <set>
 
 namespace minisys {
 
@@ -34,12 +35,37 @@ void ListTabPresenter::OnActivate() {
 }
 
 void ListTabPresenter::Refresh() {
+    // REVIEW P1-1: pull a UI-private copy; render/sort/collect/plans all
+    // work on it from here on.
+    snapshot_ = SessionService::Instance().Results(tab_);
     RenderItems();
 }
 
+const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
+    if (row < 0) return nullptr;
+    LVITEMW lvi{}; lvi.iItem = row; lvi.mask = LVIF_PARAM;
+    if (!ListView_GetItem(ui_.list, &lvi)) return nullptr;
+    size_t idx = static_cast<size_t>(lvi.lParam);
+    return idx < snapshot_.size() ? &snapshot_[idx] : nullptr;
+}
+
 void ListTabPresenter::RenderItems() {
+    // REVIEW P0-6 / 07-X6: user checks used to be silently wiped on every
+    // re-render (sort, tab switch) — snapshot by path and restore.
+    std::set<std::wstring> wasChecked;
+    int prevCount = ListView_GetItemCount(ui_.list);
+    for (int row = 0; row < prevCount && row < static_cast<int>(snapshot_.size()); ++row) {
+        if (!ListView_GetCheckState(ui_.list, row)) continue;
+        LVITEMW lvi{}; lvi.iItem = row; lvi.mask = LVIF_PARAM;
+        ListView_GetItem(ui_.list, &lvi);
+        size_t idx = static_cast<size_t>(lvi.lParam);
+        if (idx < snapshot_.size()) {
+            wasChecked.insert(ToLower(snapshot_[idx].path.wstring()));
+        }
+    }
+
     ListView_DeleteAllItems(ui_.list);
-    auto& items = SessionService::Instance().MutableResults(tab_);
+    auto& items = snapshot_;
     for (size_t i = 0; i < items.size(); ++i) {
         const auto& it = items[i];
         LVITEMW lvi{}; lvi.mask = LVIF_TEXT | LVIF_PARAM;
@@ -47,12 +73,34 @@ void ListTabPresenter::RenderItems() {
         lvi.pszText = const_cast<LPWSTR>(it.category.c_str());
         lvi.lParam  = static_cast<LPARAM>(i);
         int row = ListView_InsertItem(ui_.list, &lvi);
-        ListView_SetItemText(ui_.list, row, 1, const_cast<LPWSTR>(it.title.c_str()));
-        std::wstring sz = FormatSize(it.sizeBytes);
-        ListView_SetItemText(ui_.list, row, 2, sz.data());
-        ListView_SetItemText(ui_.list, row, 3, const_cast<LPWSTR>(it.detail.c_str()));
-        if (it.recommended) ListView_SetCheckState(ui_.list, row, TRUE);
+        std::wstring badge = RiskBadge(it);
+        ListView_SetItemText(ui_.list, row, 1, badge.data());
+        ListView_SetItemText(ui_.list, row, 2, const_cast<LPWSTR>(it.title.c_str()));
+        std::wstring sz = it.sizeBytes ? FormatSize(it.sizeBytes) : std::wstring(L"—");
+        ListView_SetItemText(ui_.list, row, 3, sz.data());
+        ListView_SetItemText(ui_.list, row, 4, const_cast<LPWSTR>(it.detail.c_str()));
+        bool check = it.recommended;
+        if (!wasChecked.empty() &&
+            wasChecked.count(ToLower(it.path.wstring()))) {
+            check = true;   // restore the user's explicit choice
+        }
+        if (check) ListView_SetCheckState(ui_.list, row, TRUE);
     }
+}
+
+// v2.2 (REVIEW P0-6): risk badge text for column 1. Rule-less items
+// (large files / apps / folder tree) are honestly marked unclassified
+// instead of guessed at.
+std::wstring ListTabPresenter::RiskBadge(const ScanItem& it) {
+    if (it.ruleId.empty() && it.path != L"$RECYCLE.BIN") return L"—";
+    if (it.path == L"$RECYCLE.BIN") return L"⚠ 不可逆";
+    switch (it.riskLevel) {
+        case RiskLevel::Safe:      return L"🛡 安全";
+        case RiskLevel::Cautious:  return L"ℹ 谨慎";
+        case RiskLevel::Advanced:  return L"⚠ 系统组件";
+        case RiskLevel::InfoOnly:  return L"⊘ 仅提示";
+    }
+    return L"—";
 }
 
 std::vector<size_t> ListTabPresenter::CollectChecked() const {
@@ -62,7 +110,8 @@ std::vector<size_t> ListTabPresenter::CollectChecked() const {
         if (!ListView_GetCheckState(ui_.list, i)) continue;
         LVITEMW lvi{}; lvi.iItem = i; lvi.mask = LVIF_PARAM;
         ListView_GetItem(ui_.list, &lvi);
-        out.push_back(static_cast<size_t>(lvi.lParam));
+        size_t idx = static_cast<size_t>(lvi.lParam);
+        if (idx < snapshot_.size()) out.push_back(idx);
     }
     return out;
 }
@@ -80,15 +129,16 @@ void ListTabPresenter::SortByTime() {
 }
 
 void ListTabPresenter::OnColumnClick(int col) {
-    // col 2 = size, col 3 = detail; map col 2 -> sort size, others -> sort time
-    int sortKey = (col == 2) ? 0 : 1;
+    // v2.2 columns: 0 分类, 1 风险, 2 项目, 3 大小, 4 详情 — only column 3
+    // (size) sorts by size; everything else sorts by time.
+    int sortKey = (col == 3) ? 0 : 1;
     if (sortCol_ == sortKey) sortAsc_ = !sortAsc_;
     else { sortCol_ = sortKey; sortAsc_ = false; }
     ApplySortAndRefresh();
 }
 
 void ListTabPresenter::ApplySortAndRefresh() {
-    auto& items = SessionService::Instance().MutableResults(tab_);
+    auto& items = snapshot_;   // UI-private (REVIEW P1-1)
     if (items.empty()) return;
 
     bool asc = sortAsc_;
@@ -104,7 +154,7 @@ void ListTabPresenter::ApplySortAndRefresh() {
                            : (a.createTime > b.createTime);
             });
     }
-    Refresh();
+    RenderItems();
 }
 
 // =====================================================================
@@ -190,15 +240,26 @@ FolderTreePresenter::FolderTreePresenter(UiHandles ui, SessionService& svc)
     : TabPresenter(TabId::FolderTree), ui_(ui), svc_(svc) {}
 
 std::unique_ptr<Scanner> FolderTreePresenter::BuildScanner() {
-    // Scan all fixed drives (the drive filter edit is not shown on this tab).
+    // REVIEW P3 drill-down: with a focus root, scan its top level; a plain
+    // 扫描 click clears the focus first (full-drive view).
+    if (HasFocusRoot()) {
+        FolderTreeScanner::Config cfg;
+        cfg.drives = { focusRoot_.wstring() };
+        ClearFocusRoot();
+        return std::make_unique<FolderTreeScanner>(std::move(cfg));
+    }
     return std::make_unique<FolderTreeScanner>();
+}
+
+void FolderTreePresenter::OnScanDone() {
+    Refresh();
 }
 
 void FolderTreePresenter::Refresh() {
     TreeView_DeleteAllItems(ui_.tree);
     itemPaths_.clear();
 
-    auto& items = svc_.MutableResults(TabId::FolderTree);
+    auto items = svc_.Results(TabId::FolderTree);   // copy (P1-1)
     if (items.empty()) return;
 
     std::wstring lastDrive;
@@ -248,6 +309,67 @@ void FolderTreePresenter::Refresh() {
     }
 }
 
+void ListTabPresenter::OnItemActivated(int row) {
+    const ScanItem* it = ItemAtRow(row);
+    if (it) ShowItemInfo(*it);
+}
+
+// REVIEW P1-6 (08-F3): the "why is this here / what happens / can I undo"
+// panel. Runs off the rule table (ruleId → JunkRules) with an honest
+// fallback for rule-less items (large files / apps / folder tree).
+void ListTabPresenter::ShowItemInfo(const ScanItem& it) {
+    std::wstring what = FormatW(L"%s\n%s", it.title.c_str(),
+                                it.path.wstring().c_str());
+
+    std::wstring consequence;
+    std::wstring undoLine;
+    if (it.ruleId.empty()) {
+        consequence = L"非规则项（大文件/应用/文件夹），请自行判断是否需要。"
+                      L"操作仍受安全闸保护（系统目录、云文件一律拒绝）。";
+        undoLine = it.path == L"$RECYCLE.BIN"
+                       ? L"清空回收站不可撤销。"
+                       : L"移入隔离区，可在“操作历史”一键还原。";
+    } else {
+        switch (it.riskLevel) {
+            case RiskLevel::Safe:
+                consequence = L"缓存类内容，程序下次运行会自动重建。";
+                break;
+            case RiskLevel::Cautious:
+                consequence = L"清理后系统或程序需要重新下载/重建，期间可能变慢。";
+                break;
+            case RiskLevel::Advanced:
+                consequence = L"系统组件：仅通过官方系统命令处理，不会直接删除文件。";
+                break;
+            case RiskLevel::InfoOnly:
+                consequence = L"系统关键文件，仅作展示。请按详情列的指引手动调整。";
+                break;
+        }
+        if (it.strategy == CleanStrategy::Delegate) {
+            consequence += L"\n将执行: " + it.command;
+            undoLine = L"系统命令的效果不可自动撤销。";
+        } else if (it.strategy == CleanStrategy::InfoOnly) {
+            undoLine = L"不可执行。";
+        } else {
+            undoLine = L"移入隔离区，可在“操作历史”一键还原；清空隔离区后才真正释放空间。";
+        }
+    }
+
+    TASKDIALOGCONFIG tc{};
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = ui_.main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    tc.pszWindowTitle = L"项目说明";
+    tc.pszMainIcon = TD_INFORMATION_ICON;
+    tc.pszMainInstruction = it.title.c_str();
+    std::wstring content = L"【这是什么】\n" + what +
+                           L"\n\n【处理后会怎样】\n" + consequence +
+                           L"\n\n【能否还原】\n" + undoLine;
+    tc.pszContent = content.c_str();
+    tc.dwCommonButtons = TDCBF_OK_BUTTON;
+    int pressed = 0;
+    TaskDialogIndirect(&tc, &pressed, nullptr, nullptr);
+}
+
 bool FolderTreePresenter::OnContextMenu() {
     // Get the item under the cursor
     DWORD pos = GetMessagePos();
@@ -276,12 +398,14 @@ bool FolderTreePresenter::OnContextMenu() {
     DestroyMenu(hMenu);
 
     if (cmd == IDM_CTX_DELETE) {
-        std::wstring msg = FormatW(L"确定要删除文件夹:\n%s\n\n此操作将移入隔离区（可撤销）。",
+        // REVIEW P0-6: destructive confirmation defaults to CANCEL; wording
+        // matches the actual operation (07-X13: "删除" was misleading).
+        std::wstring msg = FormatW(L"确定要将文件夹移入隔离区吗？\n%s\n\n可在“操作历史”中一键还原。",
             folderPath.wstring().c_str());
-        if (MessageBoxW(ui_.main, msg.c_str(), L"确认删除",
-                MB_OKCANCEL | MB_ICONWARNING) != IDOK) return false;
+        if (MessageBoxW(ui_.main, msg.c_str(), L"移入隔离区",
+                MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING) != IDOK) return false;
 
-        auto& ftItems = svc_.MutableResults(TabId::FolderTree);
+        auto ftItems = svc_.Results(TabId::FolderTree);   // copy (P1-1)
         size_t idx = static_cast<size_t>(-1);
         for (size_t i = 0; i < ftItems.size(); ++i) {
             if (ftItems[i].path == folderPath) { idx = i; break; }
@@ -293,14 +417,16 @@ bool FolderTreePresenter::OnContextMenu() {
         auto plan = PlanBuilder::Build(TabId::FolderTree, ftItems, {idx});
         switch (svc_.ExecutePlan(plan)) {
             case SessionService::PlanStart::Started:
+                // REVIEW P0-5 (03-B5): this path used to run without
+                // disabling anything — tell the main window to lock the
+                // action matrix while the plan executes.
+                PostMessageW(ui_.main, WM_APP_TASK_STARTED, 0, 0);
                 return true;
             case SessionService::PlanStart::Busy:
-                MessageBoxW(ui_.main, L"已有任务在进行中，请稍候。", L"提示",
-                            MB_OK | MB_ICONINFORMATION);
+                SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
                 break;
             case SessionService::PlanStart::PlanStale:
-                MessageBoxW(ui_.main, L"计划已过期，请重新扫描。", L"提示",
-                            MB_OK | MB_ICONWARNING);
+                SetWindowTextW(ui_.info, L"⚠ 计划已过期，请重新扫描。");
                 break;
         }
     }
@@ -321,8 +447,9 @@ void HistoryPresenter::Refresh() {
         const auto& r = recs[i];
         LVITEMW it{}; it.mask = LVIF_TEXT | LVIF_PARAM;
         it.iItem = static_cast<int>(i);
-        std::wstring c0 = OperationLog::TypeToStr(r.type) + L" / " +
-                          OperationLog::StatusToStr(r.status);
+        // v2.2 (REVIEW P2 / 07-X20): human-readable type/state instead of
+        // machine codes in column 0.
+        std::wstring c0 = HistoryTypeLabel(r);
         it.pszText = c0.data();
         it.lParam = static_cast<LPARAM>(i);
         int row = ListView_InsertItem(ui_.list, &it);
@@ -333,40 +460,71 @@ void HistoryPresenter::Refresh() {
         if (!r.target.empty()) detail += L"  →  " + r.target;
         if (!r.note.empty())   detail += L"  | " + r.note;
         ListView_SetItemText(ui_.list, row, 3, const_cast<LPWSTR>(detail.c_str()));
+        std::wstring risk = HistoryRiskLabel(r);
+        ListView_SetItemText(ui_.list, row, 4, risk.data());
     }
 }
 
+std::wstring HistoryPresenter::HistoryTypeLabel(const OpRecord& r) {
+    std::wstring type;
+    switch (r.type) {
+        case OpType::Quarantine:      type = L"已隔离"; break;
+        case OpType::MoveAndJunction: type = L"已迁移"; break;
+        case OpType::EmptyRecycleBin: type = L"清空回收站"; break;
+        case OpType::Delegate:        type = L"系统命令"; break;
+        case OpType::DeleteToRecycleBin: default: type = L"回收站删除"; break;
+    }
+    switch (r.status) {
+        case OpStatus::Success:      return type + L" · 成功";
+        case OpStatus::Reverted:     return type + L" · 已还原";
+        case OpStatus::Failed:       return type + L" · 失败";
+        case OpStatus::Interrupted:  return type + L" · 中断";
+        case OpStatus::Pending: default: return type;
+    }
+}
+
+std::wstring HistoryPresenter::HistoryRiskLabel(const OpRecord& r) {
+    if (r.status == OpStatus::Failed ||
+        r.status == OpStatus::Interrupted) return L"× 需关注";
+    if (r.type == OpType::EmptyRecycleBin) return L"⚠ 不可逆";
+    if (!r.isReversible) return L"⚠ 不可逆";
+    return L"🛡 可还原";
+}
+
 void HistoryPresenter::UndoSelected() {
-    int sel = ListView_GetNextItem(ui_.list, -1, LVNI_SELECTED);
-    if (sel < 0) {
-        MessageBoxW(ui_.main, L"请选中一条历史记录。", L"提示",
-                    MB_OK | MB_ICONINFORMATION);
+    // REVIEW P1-4 (07-X9): multi-select batch undo, async on the worker —
+    // one 18-item quarantine batch used to need 36+ clicks and each
+    // migration undo froze the UI for the whole copy-back.
+    std::vector<OpRecord> selected;
+    int idx = -1;
+    auto recs = OperationLog::Instance().LoadAll();
+    while ((idx = ListView_GetNextItem(ui_.list, idx, LVNI_SELECTED)) >= 0) {
+        if (idx < static_cast<int>(recs.size())) selected.push_back(recs[idx]);
+    }
+    if (selected.empty()) {
+        SetWindowTextW(ui_.info, L"ℹ 请先选中一条或多条历史记录。");
         return;
     }
-    auto recs = OperationLog::Instance().LoadAll();
-    if (sel >= static_cast<int>(recs.size())) return;
-    const auto& r = recs[sel];
 
-    std::wstring err;
-    switch (svc_.UndoRecord(r, err)) {
-        case SessionService::UndoResult::Ok:
-            MessageBoxW(ui_.main, L"已撤销。", L"完成", MB_OK | MB_ICONINFORMATION);
-            break;
-        case SessionService::UndoResult::NotReversible:
-            MessageBoxW(ui_.main, L"该记录不可撤销。", L"提示",
-                        MB_OK | MB_ICONWARNING);
-            break;
-        case SessionService::UndoResult::DeleteType:
-            MessageBoxW(ui_.main,
-                L"回收站删除请手动从回收站还原（迁移与隔离区操作支持自动撤销）。",
-                L"提示", MB_OK | MB_ICONINFORMATION);
-            break;
-        case SessionService::UndoResult::Failed:
-            MessageBoxW(ui_.main, (L"撤销失败: " + err).c_str(), L"错误",
-                        MB_OK | MB_ICONERROR);
-            break;
+    // Pre-flight eligibility classification for a clear hint.
+    size_t eligible = 0, notReversible = 0, deleteType = 0;
+    for (const auto& r : selected) {
+        if (!r.isReversible || r.status != OpStatus::Success) ++notReversible;
+        else if (r.type != OpType::MoveAndJunction && r.type != OpType::Quarantine) ++deleteType;
+        else ++eligible;
     }
-    Refresh();
+    if (eligible == 0) {
+        SetWindowTextW(ui_.info, deleteType
+            ? L"ℹ 选中项均为回收站删除（请手动从回收站还原）。"
+            : L"ℹ 选中记录不可撤销（仅成功且可逆的记录支持）。");
+        return;
+    }
+
+    if (!svc_.UndoRecordsAsync(selected)) {
+        SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
+        return;
+    }
+    PostMessageW(ui_.main, WM_APP_TASK_STARTED, 0, 0);
 }
 
 } // namespace minisys

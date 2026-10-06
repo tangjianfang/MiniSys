@@ -12,38 +12,49 @@ namespace minisys {
 
 namespace {
 
-// USN record layouts (ntifs.h is WDK-only; re-declared like MS_REPARSE_DATA_BUFFER).
-#pragma pack(push, 8)
-struct MSN_RECORD_V2 {
-    DWORD      RecordLength;
-    DWORD      MajorVersion;
-    DWORD      MinorVersion;
-    DWORDLONG  FileReferenceNumber;
-    DWORDLONG  ParentFileReferenceNumber;
-    USN        Usn;
-    LARGE_INTEGER TimeChanged;
-    LARGE_INTEGER Reason;
-    DWORD      SourceInfo;
-    DWORD      FileAttributes;
-    DWORD      FileNameLength;    // bytes
-    WCHAR      FileName[1];
+// v2.2 (REVIEW P0-7 / 03-B2): the hand-declared record structs were
+// misaligned with the real on-disk layout field-by-field (+8 bytes) — the
+// SDK's USN_RECORD_V2/V3 from winioctl.h are used directly now.
+
+// Parse one USN record header + payload from a raw buffer.
+struct ParsedRecord {
+    DWORDLONG frn = 0;
+    DWORDLONG pfrn = 0;
+    uint64_t  mtime = 0;
+    DWORD     attrs = 0;
+    DWORDLONG reason = 0;
+    const WCHAR* name = nullptr;
+    DWORD     nameLenBytes = 0;   // bytes
 };
-struct MSN_RECORD_V3 {
-    DWORD      RecordLength;
-    DWORD      MajorVersion;
-    DWORD      MinorVersion;
-    DWORDLONG  FileReferenceNumber;
-    DWORDLONG  ParentFileReferenceNumber;
-    USN        Usn;
-    LARGE_INTEGER TimeChanged;
-    LARGE_INTEGER Reason;
-    DWORD      SourceInfo;
-    DWORD      FileAttributes;
-    DWORD      FileNameLength;    // bytes
-    DWORD      Reserved;
-    WCHAR      FileName[1];
-};
-#pragma pack(pop)
+
+bool ParseUsnRecord(const BYTE* base, ParsedRecord& out) {
+    auto* hdr = reinterpret_cast<const USN_RECORD_COMMON_HEADER*>(base);
+    if (hdr->MajorVersion >= 3) {
+        auto* r = reinterpret_cast<const USN_RECORD_V3*>(base);
+        // FILE_ID_128: use the low 8 bytes as the tree key (high bytes are
+        // zero on NTFS).
+        DWORDLONG frn = 0, pfrn = 0;
+        memcpy(&frn, r->FileReferenceNumber.Identifier, 8);
+        memcpy(&pfrn, r->ParentFileReferenceNumber.Identifier, 8);
+        out.frn = frn;
+        out.pfrn = pfrn;
+        out.mtime = static_cast<uint64_t>(r->TimeStamp.QuadPart);
+        out.reason = r->Reason;
+        out.attrs = r->FileAttributes;
+        out.name = reinterpret_cast<const WCHAR*>(base + r->FileNameOffset);
+        out.nameLenBytes = r->FileNameLength;
+        return true;
+    }
+    auto* r = reinterpret_cast<const USN_RECORD_V2*>(base);
+    out.frn = r->FileReferenceNumber;
+    out.pfrn = r->ParentFileReferenceNumber;
+    out.mtime = static_cast<uint64_t>(r->TimeStamp.QuadPart);
+    out.reason = r->Reason;
+    out.attrs = r->FileAttributes;
+    out.name = reinterpret_cast<const WCHAR*>(base + r->FileNameOffset);
+    out.nameLenBytes = r->FileNameLength;
+    return true;
+}
 
 std::wstring VolumeHandlePath(wchar_t drive) {
     return std::wstring(L"\\\\.\\") + drive + L":";
@@ -228,7 +239,13 @@ bool VolumeIndex::BuildFull(wchar_t drive,
     }
 
     if (ok) {
-        MFT_ENUM_DATA med{};
+        // v2.2 (REVIEW P0-7 / 03-B1): on the current SDK MFT_ENUM_DATA is an
+        // alias of MFT_ENUM_DATA_V1 — zero-init left Min/MaxMajorVersion at
+        // 0/0, an illegal version range, so FSCTL_ENUM_USN_DATA failed with
+        // Win32 87 on every machine and the index never built.
+        MFT_ENUM_DATA_V1 med{};
+        med.MinMajorVersion = 2;   // V2 (NTFS) + V3 (ReFS/128-bit IDs)
+        med.MaxMajorVersion = 3;
         std::vector<char> buf(64 * 1024);
         DWORD ret = 0;
         size_t reported = 0;
@@ -248,42 +265,27 @@ bool VolumeIndex::BuildFull(wchar_t drive,
             DWORDLONG nextFrn = *reinterpret_cast<DWORDLONG*>(buf.data());
             size_t off = sizeof(DWORDLONG);
             while (off + sizeof(DWORD) <= ret) {
-                auto* rec = reinterpret_cast<MSN_RECORD_V2*>(buf.data() + off);
-                if (rec->RecordLength == 0) break;
-                DWORD attrs = 0;
-                DWORDLONG frn = 0, pfrn = 0;
-                uint64_t mtime = 0;
-                const WCHAR* name = nullptr;
-                DWORD nameLen = 0;
-                if (rec->MajorVersion >= 3) {
-                    auto* r3 = reinterpret_cast<MSN_RECORD_V3*>(buf.data() + off);
-                    attrs = r3->FileAttributes;
-                    frn = r3->FileReferenceNumber;
-                    pfrn = r3->ParentFileReferenceNumber;
-                    mtime = static_cast<uint64_t>(r3->TimeChanged.QuadPart);
-                    name = r3->FileName;
-                    nameLen = r3->FileNameLength;
-                } else {
-                    attrs = rec->FileAttributes;
-                    frn = rec->FileReferenceNumber;
-                    pfrn = rec->ParentFileReferenceNumber;
-                    mtime = static_cast<uint64_t>(rec->TimeChanged.QuadPart);
-                    name = rec->FileName;
-                    nameLen = rec->FileNameLength;
+                auto* hdr = reinterpret_cast<const USN_RECORD_COMMON_HEADER*>(
+                    buf.data() + off);
+                if (hdr->RecordLength < sizeof(*hdr) || off + hdr->RecordLength > ret) {
+                    break;
                 }
-                if (nameLen > 0 && (nameLen % sizeof(WCHAR)) == 0) {
+                ParsedRecord pr;
+                if (ParseUsnRecord(reinterpret_cast<const BYTE*>(buf.data() + off),
+                                   pr) &&
+                    pr.nameLenBytes > 0 && (pr.nameLenBytes % sizeof(WCHAR)) == 0) {
                     Node n;
-                    n.frn = frn;
-                    n.parentFrn = pfrn;
-                    n.attrs = attrs;
-                    n.lastWrite = mtime;
-                    n.isDir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    n.frn = pr.frn;
+                    n.parentFrn = pr.pfrn;
+                    n.attrs = pr.attrs;
+                    n.lastWrite = pr.mtime;
+                    n.isDir = (pr.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     n.nameOff = static_cast<uint32_t>(names_.size());
-                    n.nameLen = nameLen / sizeof(WCHAR);
-                    names_.append(name, n.nameLen);
+                    n.nameLen = pr.nameLenBytes / sizeof(WCHAR);
+                    names_.append(pr.name, n.nameLen);
                     nodes_.push_back(n);
                 }
-                off += rec->RecordLength;
+                off += hdr->RecordLength;
             }
             if (reported + 100000 <= nodes_.size()) {
                 reported = nodes_.size();
@@ -329,11 +331,14 @@ bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
     if (DeviceIoControl(vol, FSCTL_QUERY_USN_JOURNAL, nullptr, 0, &jd,
                         sizeof(jd), &br, nullptr) &&
         jd.UsnJournalID == journalId_) {
-        READ_USN_JOURNAL_DATA ruj{};
+        READ_USN_JOURNAL_DATA_V1 ruj{};
         ruj.StartUsn = nextUsn_;
         ruj.ReasonMask = 0xFFFFFFFF;   // all reasons
         ruj.BytesToWaitFor = 0;
         ruj.Timeout = 0;
+        ruj.UsnJournalID = journalId_;          // REVIEW P0-7 / 03-B3
+        ruj.MinMajorVersion = 2;
+        ruj.MaxMajorVersion = 3;
 
         std::vector<char> buf(64 * 1024);
         DWORD ret = 0;
@@ -357,45 +362,27 @@ bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
             USN nextUsn = *reinterpret_cast<USN*>(buf.data());
             size_t off = sizeof(USN);
             while (off + sizeof(DWORD) <= ret) {
-                auto* rec = reinterpret_cast<MSN_RECORD_V2*>(buf.data() + off);
-                if (rec->RecordLength == 0) break;
-                DWORD attrs = 0;
-                DWORDLONG frn = 0, pfrn = 0;
-                uint64_t mtime = 0;
-                DWORDLONG reason = 0;
-                const WCHAR* name = nullptr;
-                DWORD nameLen = 0;
-                if (rec->MajorVersion >= 3) {
-                    auto* r3 = reinterpret_cast<MSN_RECORD_V3*>(buf.data() + off);
-                    attrs = r3->FileAttributes;
-                    frn = r3->FileReferenceNumber;
-                    pfrn = r3->ParentFileReferenceNumber;
-                    mtime = static_cast<uint64_t>(r3->TimeChanged.QuadPart);
-                    reason = r3->Reason.QuadPart;
-                    name = r3->FileName;
-                    nameLen = r3->FileNameLength;
-                } else {
-                    attrs = rec->FileAttributes;
-                    frn = rec->FileReferenceNumber;
-                    pfrn = rec->ParentFileReferenceNumber;
-                    mtime = static_cast<uint64_t>(rec->TimeChanged.QuadPart);
-                    reason = rec->Reason.QuadPart;
-                    name = rec->FileName;
-                    nameLen = rec->FileNameLength;
+                auto* hdr = reinterpret_cast<const USN_RECORD_COMMON_HEADER*>(
+                    buf.data() + off);
+                if (hdr->RecordLength < sizeof(*hdr) || off + hdr->RecordLength > ret) {
+                    break;
                 }
-                constexpr DWORDLONG kRenameNew = 0x00002000;   // USN_REASON_RENAME_NEW_NAME
-                constexpr DWORDLONG kFileDelete = 0x00000010;  // USN_REASON_FILE_DELETE
-                if (nameLen > 0 && (nameLen % sizeof(WCHAR)) == 0) {
+                ParsedRecord pr;
+                if (ParseUsnRecord(reinterpret_cast<const BYTE*>(buf.data() + off),
+                                   pr) &&
+                    pr.nameLenBytes > 0 && (pr.nameLenBytes % sizeof(WCHAR)) == 0) {
+                    constexpr DWORDLONG kRenameNew = 0x00002000;   // USN_REASON_RENAME_NEW_NAME
+                    constexpr DWORDLONG kFileDelete = 0x00000010;  // USN_REASON_FILE_DELETE
                     Change c;
-                    c.frn = frn;
-                    c.parentFrn = pfrn;
-                    c.attrs = attrs;
-                    c.lastWrite = mtime;
-                    c.deleted = (reason & kFileDelete) && !(reason & kRenameNew);
-                    c.name.assign(name, nameLen / sizeof(WCHAR));
+                    c.frn = pr.frn;
+                    c.parentFrn = pr.pfrn;
+                    c.attrs = pr.attrs;
+                    c.lastWrite = pr.mtime;
+                    c.deleted = (pr.reason & kFileDelete) && !(pr.reason & kRenameNew);
+                    c.name.assign(pr.name, pr.nameLenBytes / sizeof(WCHAR));
                     changes.push_back(std::move(c));
                 }
-                off += rec->RecordLength;
+                off += hdr->RecordLength;
             }
             nextUsn_ = nextUsn;
             ruj.StartUsn = nextUsn;
@@ -407,8 +394,12 @@ bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
             }
         }
         if (readOk && nextUsn_ >= static_cast<int64_t>(jd.NextUsn) - 1) {
-            // Applied everything currently in the journal.
-            if (ApplyChanges(changes)) {
+            // Applied everything currently in the journal. With zero
+            // changes the lookup rebuild (Finalize) is skipped entirely —
+            // it costs seconds at the 1M-entry scale (REVIEW 03-B3).
+            if (changes.empty()) {
+                keepIncremental = true;
+            } else if (ApplyChanges(changes)) {
                 keepIncremental = true;
             }
         }

@@ -29,11 +29,29 @@ static const wchar_t* LevelTag(LogLevel l) {
 Logger::Logger() : impl_(new Impl) {
     auto dir = LogsDir();
     auto path = dir / L"minisys.log";
+
+    // REVIEW P3: rotation — one .old generation at 5 MB, so years of
+    // session logs cannot grow unbounded.
+    std::error_code ec;
+    if (auto size = std::filesystem::file_size(path, ec);
+        !ec && size > 5ull * 1024 * 1024) {
+        auto old = path;
+        old += L".old";
+        MoveFileExW(path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+
     impl_->stream.open(path, std::ios::out | std::ios::app);
 }
 
 Logger::~Logger() {
     delete impl_;
+}
+
+void Logger::SetLogPathForTesting(const std::wstring& path) {
+    // Must run before Instance() is first touched.
+    auto& inst = Instance();
+    if (inst.impl_->stream.is_open()) inst.impl_->stream.close();
+    inst.impl_->stream.open(path, std::ios::out | std::ios::trunc);
 }
 
 Logger& Logger::Instance() {

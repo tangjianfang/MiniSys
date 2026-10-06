@@ -50,4 +50,10 @@ bool IsReparsePoint(const std::filesystem::path& p);
 // Compute total size of a directory subtree (skips reparse points and unreadable entries).
 unsigned long long DirectorySize(const std::filesystem::path& p);
 
+// REVIEW P1-3 (03-B11): parallel variant — a directory-queue worker pool
+// (same shape as FastWalk). The single-threaded DFS made WinSxS (300k
+// entries) alone cost tens of seconds during every junk scan.
+unsigned long long DirectorySizeParallel(const std::filesystem::path& p,
+                                         int numThreads = 0);
+
 } // namespace minisys

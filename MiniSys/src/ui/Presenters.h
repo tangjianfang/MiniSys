@@ -1,6 +1,7 @@
 #pragma once
 #include "core/TabId.h"
 #include "core/Scanner.h"
+#include "core/Operation.h"
 #include "ui/UiHandles.h"
 
 #include <windows.h>
@@ -40,6 +41,8 @@ public:
     virtual void SortBySize() {}
     virtual void SortByTime() {}
     virtual void OnColumnClick(int /*col*/) {}
+    // REVIEW P1-6 (08-F3): double-click / "说明…" opens the explanation.
+    virtual void OnItemActivated(int /*row*/) {}
 
 protected:
     TabId tab_;
@@ -56,18 +59,27 @@ public:
     void SortBySize() override;
     void SortByTime() override;
     void OnColumnClick(int col) override;
+    void OnItemActivated(int row) override;
 
-    // Indices (into SessionService results) of checked rows.
+    // Indices (into the snapshot) of checked rows.
     std::vector<size_t> CollectChecked() const;
+
+    // REVIEW P1-1: the presenter renders from its own UI-private snapshot
+    // — never from the worker-owned storage. Plans are built from it too.
+    const std::vector<ScanItem>& Snapshot() const { return snapshot_; }
+    const ScanItem* ItemAtRow(int row) const;
 
 protected:
     UiHandles ui_;
     int  sortCol_ = -1;    // -1 none, 0 size, 1 time
     bool sortAsc_ = false; // false = descending
+    std::vector<ScanItem> snapshot_;   // UI-private copy (REVIEW P1-1)
 
 private:
     void ApplySortAndRefresh();
     void RenderItems();
+    void ShowItemInfo(const ScanItem& it);   // REVIEW P1-6
+    static std::wstring RiskBadge(const ScanItem& it);
 };
 
 class JunkPresenter : public ListTabPresenter {
@@ -94,15 +106,25 @@ public:
 
     std::unique_ptr<Scanner> BuildScanner() override;
     void Refresh() override;   // rebuild TreeView from results
+    void OnScanDone() override;
 
     // Right-click context menu flow (delete folder). Returns true when an
     // item was deleted and the tree changed.
     bool OnContextMenu();
 
+    // REVIEW P3: drill into a subfolder (double-click) — the scan then
+    // covers that folder's top level instead of all fixed drives; clicking
+    // 扫描 again returns to the full-drive view.
+    void SetFocusRoot(const std::filesystem::path& p) { focusRoot_ = p; }
+    void ClearFocusRoot() { focusRoot_.clear(); }
+    bool HasFocusRoot() const { return !focusRoot_.empty(); }
+    std::filesystem::path FocusRoot() const { return focusRoot_; }
+
 private:
     UiHandles ui_;
     SessionService& svc_;
     std::map<HTREEITEM, std::filesystem::path> itemPaths_;
+    std::filesystem::path focusRoot_;   // REVIEW P3 drill-down
 };
 
 class HistoryPresenter : public TabPresenter {
@@ -115,6 +137,8 @@ public:
 private:
     UiHandles ui_;
     SessionService& svc_;
+    static std::wstring HistoryTypeLabel(const OpRecord& r);
+    static std::wstring HistoryRiskLabel(const OpRecord& r);
 };
 
 } // namespace minisys

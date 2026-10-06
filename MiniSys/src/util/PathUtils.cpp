@@ -4,6 +4,11 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <system_error>
 #include <vector>
 
@@ -161,6 +166,120 @@ unsigned long long DirectorySize(const fs::path& p) {
         FindClose(h);
     }
     return total;
+}
+
+namespace {
+
+// Shared worker pool over a directory queue (REVIEW P1-3).
+class SizePool {
+public:
+    SizePool(int numThreads, std::atomic<unsigned long long>& total)
+        : total_(total) {
+        if (numThreads <= 0) {
+            unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) hw = 4;
+            numThreads = static_cast<int>(hw);
+            if (numThreads > 8) numThreads = 8;
+            if (numThreads < 2) numThreads = 2;
+        }
+        for (int i = 0; i < numThreads; ++i) {
+            threads_.emplace_back([this] { Worker(); });
+        }
+    }
+    ~SizePool() { Join(); }
+
+    void Push(const fs::path& dir) {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            queue_.push_back(dir);
+        }
+        cv_.notify_one();
+    }
+
+    void Join() {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : threads_) {
+            if (t.joinable()) t.join();
+        }
+        threads_.clear();
+    }
+
+private:
+    void Worker() {
+        std::vector<fs::path> localStack;
+        WIN32_FIND_DATAW fd{};
+        for (;;) {
+            fs::path dir;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&] { return !queue_.empty() || done_; });
+                if (queue_.empty()) return;   // done_ and nothing left
+                dir = std::move(queue_.front());
+                queue_.pop_front();
+                ++inflight_;
+            }
+            localStack.clear();
+            localStack.push_back(dir);
+            while (!localStack.empty()) {
+                fs::path d = std::move(localStack.back());
+                localStack.pop_back();
+                std::wstring search = LongPath(d);
+                if (!search.empty() && search.back() != L'\\' && search.back() != L'/')
+                    search.push_back(L'\\');
+                search.push_back(L'*');
+                HANDLE h = FindFirstFileExW(search.c_str(), FindExInfoBasic, &fd,
+                                            FindExSearchNameMatch, nullptr,
+                                            FIND_FIRST_EX_LARGE_FETCH);
+                if (h == INVALID_HANDLE_VALUE) continue;
+                do {
+                    const wchar_t* n = fd.cFileName;
+                    if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+                    DWORD attr = fd.dwFileAttributes;
+                    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+                        localStack.push_back(d / n);
+                    } else {
+                        total_ += (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32)
+                                | static_cast<unsigned long long>(fd.nFileSizeLow);
+                    }
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                --inflight_;
+                if (queue_.empty() && inflight_ == 0) {
+                    done_ = true;
+                    cv_.notify_all();
+                }
+            }
+        }
+    }
+
+    std::atomic<unsigned long long>& total_;
+    std::vector<std::thread> threads_;
+    std::deque<fs::path> queue_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    int inflight_ = 0;
+    bool done_ = false;
+};
+
+} // namespace
+
+unsigned long long DirectorySizeParallel(const fs::path& p, int numThreads) {
+    if (!DirExists(p)) return 0;
+    std::atomic<unsigned long long> total{0};
+    {
+        SizePool pool(numThreads, total);
+        pool.Push(p);
+        pool.Join();   // dtor would join too; explicit for clarity
+    }
+    return total.load();
 }
 
 } // namespace minisys

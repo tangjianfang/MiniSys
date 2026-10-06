@@ -1,5 +1,7 @@
 #include "core/JunkRules.h"
 
+#include "core/DelegateOp.h"
+#include "core/GuardRails.h"
 #include "util/Json.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
@@ -91,16 +93,16 @@ std::vector<JunkRule> BuiltinRules() {
         R(L"winsxs", L"System Component", L"组件存储 (WinSxS)",
           L"%SystemRoot%\\WinSxS",
           RM::Subtree, L"", RL::Advanced, 0, CS::Delegate, false,
-          L"Dism.exe /Online /Cleanup-Image /StartComponentCleanup",
+          L"C:\\Windows\\System32\\Dism.exe /Online /Cleanup-Image /StartComponentCleanup",
           L"仅可通过 DISM 组件清理，不可直接删除"),
         R(L"windows-old", L"System Component", L"旧系统备份 (Windows.old)",
           L"%SystemDrive%\\Windows.old",
-          RM::Subtree, L"", RL::Advanced, 0, CS::Delegate, false, L"cleanmgr",
+          RM::Subtree, L"", RL::Advanced, 0, CS::Delegate, false, L"C:\\Windows\\System32\\cleanmgr.exe /VERYLOWDISK /d C:",
           L"建议通过磁盘清理工具处理"),
         R(L"hiberfil", L"System Component", L"休眠文件 hiberfil.sys",
           L"%SystemDrive%\\hiberfil.sys",
           RM::Subtree, L"", RL::Advanced, 0, CS::Delegate, false,
-          L"powercfg /h off", L"关闭休眠后自动删除"),
+          L"C:\\Windows\\System32\\powercfg.exe /h off", L"关闭休眠后自动删除"),
 
         // ---- Info-only: display + guidance ----
         R(L"pagefile", L"System Reserved", L"页面文件 pagefile.sys",
@@ -156,10 +158,115 @@ std::vector<JunkRule> ParseRulesJson(const Json& root, bool& ok) {
 
 namespace JunkRules {
 
-std::vector<JunkRule> Load() {
+namespace {
+
+LoadResult g_lastLoad;
+
+// Whitelist for DelegateOp commands (REVIEW P0-2 / 05-T-B4): commands come
+// from a user-editable file and run in an elevated process — only absolute
+// paths to system executables with a fixed argument prefix are allowed.
+bool DelegateCommandAllowedImpl(const std::wstring& cmd, std::wstring& reason) {
+    struct WhitelistEntry {
+        const wchar_t* exe;
+        const wchar_t* const* prefixes;
+        size_t prefixCount;
+    };
+    static const wchar_t* kDism[] = { L"/Online /Cleanup-Image" };
+    static const wchar_t* kPowercfg[] = { L"/h ", L"-h ", L"/hibernate " };
+    static const wchar_t* kCleanmgr[] = { L"", L"/VERYLOWDISK", L"/LOWDISK",
+                                          L"/AUTOCLEAN", L"/SAGERUN" };
+    static const WhitelistEntry kEntries[] = {
+        { L"c:\\windows\\system32\\dism.exe",    kDism,     1 },
+        { L"c:\\windows\\system32\\powercfg.exe", kPowercfg, 3 },
+        { L"c:\\windows\\system32\\cleanmgr.exe", kCleanmgr, 5 },
+    };
+
+    std::wstring exe, args;
+    if (!DelegateOp::SplitCommandLine(cmd, exe, args)) {
+        reason = L"无效的委派命令行";
+        return false;
+    }
+    // Resolve to an absolute path — a bare "Dism.exe" resolves via CWD/PATH
+    // and can be hijacked; only the absolute system location is accepted.
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD n = GetFullPathNameW(exe.c_str(), MAX_PATH * 2, buf, nullptr);
+    if (n == 0 || n >= MAX_PATH * 2) {
+        reason = L"委派命令路径无法解析: " + exe;
+        return false;
+    }
+    std::wstring abs = ToLower(buf);
+    std::wstring argsLow = ToLower(args);
+    for (const auto& e : kEntries) {
+        if (abs != e.exe) continue;
+        for (size_t i = 0; i < e.prefixCount; ++i) {
+            std::wstring p = ToLower(e.prefixes[i]);
+            if (p.empty() ? argsLow.empty()
+                          : (argsLow.size() >= p.size() &&
+                             argsLow.compare(0, p.size(), p) == 0)) {
+                return true;
+            }
+        }
+        reason = L"委派命令参数不在白名单: " + args;
+        return false;
+    }
+    reason = L"委派命令不在白名单: " + exe;
+    return false;
+}
+
+// Per-rule load-time validation (REVIEW P0-2 / 05-T-B3).
+bool ValidateRule(const JunkRule& r, std::wstring& why) {
+    if (r.strategy == CleanStrategy::Delegate) {
+        if (r.command.empty()) {
+            why = L"委派规则缺少 command";
+            return false;
+        }
+        return DelegateCommandAllowedImpl(r.command, why);
+    }
+    if (r.strategy != CleanStrategy::Quarantine) return true;  // InfoOnly: display only
+    auto expanded = ExpandEnv(r.path);
+    if (expanded.empty()) {
+        why = L"路径为空或环境变量展开失败";
+        return false;
+    }
+    // Quarantine rules may target user space or EXACTLY the built-in
+    // exempted system cleanup roots — never new system-area subtrees.
+    if (GuardRails::IsProtectedPath(expanded) &&
+        !GuardRails::IsExemptSystemCleanupRoot(expanded)) {
+        why = L"路径位于受保护系统区域";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+const LoadResult& LastLoad() {
+    return g_lastLoad;
+}
+
+bool DelegateCommandAllowed(const std::wstring& commandLine,
+                            std::wstring& reason) {
+    return DelegateCommandAllowedImpl(commandLine, reason);
+}
+
+LoadResult LoadValidated() {
+    LoadResult result;
+
+    auto validateInto = [&](std::vector<JunkRule> rules, bool external) {
+        for (auto& r : rules) {
+            std::wstring why;
+            if (!ValidateRule(r, why)) {
+                result.rejected.emplace_back(r.id, why);
+                MS_LOG_WARN(L"JunkRules: 拒绝规则 %s: %s", r.id.c_str(), why.c_str());
+                continue;
+            }
+            result.rules.push_back(std::move(r));
+        }
+        result.usedExternal = external;
+    };
+
     auto path = RulesFilePath();
     if (!path.empty() && FileExists(path)) {
-        // Read file as UTF-8.
         std::ifstream f(path, std::ios::binary);
         if (f) {
             std::string utf8((std::istreambuf_iterator<char>(f)),
@@ -170,14 +277,28 @@ std::vector<JunkRule> Load() {
             if (Json::Parse(text, root, err)) {
                 bool ok = false;
                 auto rules = ParseRulesJson(root, ok);
-                if (ok) return rules;
+                if (ok) {
+                    validateInto(std::move(rules), true);
+                    g_lastLoad = result;
+                    return result;
+                }
+                result.externalError = L"rules.json 规则表为空或格式无效";
                 MS_LOG_WARN(L"rules.json parsed but empty/invalid rules array");
             } else {
+                result.externalError = L"rules.json 解析失败: " + err;
                 MS_LOG_WARN(L"rules.json parse failed: %s", err.c_str());
             }
+        } else {
+            result.externalError = L"rules.json 无法读取";
         }
     }
-    return BuiltinRules();
+    validateInto(BuiltinRules(), false);
+    g_lastLoad = result;
+    return result;
+}
+
+std::vector<JunkRule> Load() {
+    return LoadValidated().rules;
 }
 
 std::wstring ExpandEnv(const std::wstring& s) {

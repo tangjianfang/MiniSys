@@ -211,7 +211,7 @@ bool ExpandRuleIndexed(const JunkRule& rule, const fs::path& base,
 void JunkScanner::Scan(std::vector<ScanItem>& out,
                        ProgressFn progress,
                        const std::atomic<bool>& cancel) {
-    auto rules = JunkRules::Load();
+    auto rules = JunkRules::LoadValidated().rules;
     if (progress) progress(0, 0, L"加载清理规则");
 
     // ---- 0. Shared volume index (M2): build once per session, reuse ----
@@ -255,19 +255,25 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
     if (cancel.load()) return;
 
     // ---- 2. Parallel size computation for directory candidates ----
+    // REVIEW P1-3 (03-B11): sizes for Delegate/InfoOnly candidates (WinSxS
+    // alone is ~300k entries on this machine) are display-only and were the
+    // dominant scan cost — skipped entirely now; parallel subtree sizing
+    // covers the rest.
     std::vector<Candidate*> dirs;
     for (auto& c : candidates) {
-        if (!c.isFile) dirs.push_back(&c);
+        if (!c.isFile && c.rule->strategy == CleanStrategy::Quarantine) {
+            dirs.push_back(&c);
+        }
     }
     if (!dirs.empty()) {
+        std::atomic<size_t> next{0};
+        std::atomic<size_t> done{0};
         unsigned hw = std::thread::hardware_concurrency();
         if (hw == 0) hw = 4;
         int n = static_cast<int>(hw);
         if (n > 8) n = 8;
         if (n < 2) n = 2;
         if (static_cast<int>(dirs.size()) < n) n = static_cast<int>(dirs.size());
-        std::atomic<size_t> next{0};
-        std::atomic<size_t> done{0};
         std::vector<std::thread> ts;
         std::mutex pmu;
         ts.reserve(n);
@@ -277,7 +283,8 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
                     if (cancel.load()) return;
                     size_t i = next.fetch_add(1);
                     if (i >= dirs.size()) return;
-                    dirs[i]->sizeBytes = DirectorySize(dirs[i]->path);
+                    dirs[i]->sizeBytes =
+                        DirectorySizeParallel(dirs[i]->path, /*numThreads=*/2);
                     size_t d = done.fetch_add(1) + 1;
                     {
                         std::lock_guard<std::mutex> g(pmu);
@@ -294,8 +301,32 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
 
     // ---- 3. Emit items ----
     for (auto& c : candidates) {
-        if (c.sizeBytes == 0) continue;   // nothing to gain
         const JunkRule& rule = *c.rule;
+        // REVIEW P1-3: Delegate/InfoOnly candidates skipped the size pass —
+        // emit them without a size instead of dropping them.
+        if (rule.strategy != CleanStrategy::Quarantine && c.sizeBytes == 0) {
+            ScanItem it;
+            it.category = rule.category;
+            it.title = (rule.mode == RuleMode::Subtree)
+                         ? rule.title
+                         : rule.title + L" — " + c.path.filename().wstring();
+            it.path = c.path;
+            it.sizeBytes = 0;
+            it.lastWriteFiletime = c.lastWriteFiletime;
+            it.createTime = c.lastWriteFiletime;
+            it.ruleId = rule.id;
+            it.riskLevel = rule.riskLevel;
+            it.recommended = rule.recommended;
+            it.dangerous = (rule.riskLevel >= RiskLevel::Advanced) ||
+                           (rule.strategy != CleanStrategy::Quarantine);
+            it.detail = c.path.wstring();
+            if (!rule.detailHint.empty()) it.detail += L"\n" + rule.detailHint;
+            it.strategy = rule.strategy;
+            it.command = rule.command;
+            out.push_back(std::move(it));
+            continue;
+        }
+        if (c.sizeBytes == 0) continue;   // nothing to gain
         ScanItem it;
         it.category = rule.category;
         switch (rule.mode) {
@@ -315,6 +346,8 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
         it.path        = c.path;
         it.sizeBytes   = c.sizeBytes;
         it.lastWriteFiletime = c.lastWriteFiletime;
+        it.createTime  = c.lastWriteFiletime;   // REVIEW P0-6 (07-X14): time
+                                                // sort was a no-op on this tab
         it.ruleId      = rule.id;
         it.riskLevel   = rule.riskLevel;
         it.recommended = rule.recommended;
@@ -337,10 +370,10 @@ void JunkScanner::Scan(std::vector<ScanItem>& out,
         if (QueryRecycleBin(info) && info.sizeBytes > 0) {
             ScanItem it;
             it.category    = L"Recycle Bin";
-            it.title       = L"Empty Recycle Bin (all volumes)";
+            it.title       = L"清空回收站（所有磁盘）";
             it.path        = L"$RECYCLE.BIN";
             it.sizeBytes   = info.sizeBytes;
-            it.detail      = FormatW(L"%llu items — irreversible", info.itemCount);
+            it.detail      = FormatW(L"%llu 项 — 不可逆", info.itemCount);
             it.recommended = false;
             it.dangerous   = true;
             it.riskLevel   = RiskLevel::Advanced;

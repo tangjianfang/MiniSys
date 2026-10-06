@@ -35,9 +35,33 @@ struct JunkRule {
 
 namespace JunkRules {
 
-// Load rules: rules.json next to the exe, falling back to the built-in
-// table on any parse/IO failure (R-005 mitigation).
+// Outcome of a validated rule load (REVIEW P0-2). Rules that fail
+// validation are rejected with a reason instead of silently taking effect —
+// rules.json is a user-editable file next to a requireAdministrator exe.
+struct LoadResult {
+    std::vector<JunkRule> rules;
+    bool usedExternal = false;   // rules.json parsed AND accepted
+    std::wstring externalError;  // why the external file was not used
+    // Rules dropped by validation (id → reason), logged + shown to the user.
+    std::vector<std::pair<std::wstring, std::wstring>> rejected;
+};
+
+// Load + validate: rules.json next to the exe → per-rule security checks →
+// built-in fallback. Quarantine-strategy rules may only target user space
+// or the exact built-in exempted system cleanup roots; Delegate commands
+// must match the built-in whitelist (absolute system exe + arg prefix).
+LoadResult LoadValidated();
+
+// Most recent LoadValidated() outcome (degradation visibility in the UI).
+const LoadResult& LastLoad();
+
+// Back-compat: rules only.
 std::vector<JunkRule> Load();
+
+// Delegate command whitelist check (absolute exe in the system whitelist +
+// allowed argument prefix). Returns false and fills `reason` when rejected.
+bool DelegateCommandAllowed(const std::wstring& commandLine,
+                            std::wstring& reason);
 
 // Expand %ENV% placeholders in a path (empty on failure).
 std::wstring ExpandEnv(const std::wstring& s);

@@ -6,6 +6,7 @@
 #include "core/MoveJunctionOp.h"
 #include "core/OperationLog.h"
 #include "core/QuarantineOp.h"
+#include "platform/SystemRestore.h"
 #include "res/resource.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
@@ -39,8 +40,8 @@ void SessionService::SetProgress(const std::wstring& text) {
     progressText_ = text;
 }
 
-void SessionService::Post(HWND hwnd, UINT msg) {
-    if (hwnd) PostMessageW(hwnd, msg, 0, 0);
+void SessionService::Post(HWND hwnd, UINT msg, WPARAM wp) {
+    if (hwnd) PostMessageW(hwnd, msg, wp, 0);
 }
 
 std::wstring SessionService::ProgressText() const {
@@ -53,7 +54,10 @@ const SessionService::ExecuteReport& SessionService::LastReport() const {
     return lastReport_;
 }
 
-const std::vector<ScanItem>& SessionService::Results(TabId tab) const {
+std::vector<ScanItem> SessionService::Results(TabId tab) const {
+    // REVIEW P1-1: locked copy — the UI must never hold a live reference
+    // into the worker-owned storage.
+    std::lock_guard<std::mutex> g(resultsMu_);
     return results_[static_cast<size_t>(tab)];
 }
 
@@ -113,13 +117,17 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
     }
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
-    results_[static_cast<size_t>(tab)] = std::move(buffer);
-    // M4: benchmark record (perf numbers come from the log).
-    MS_LOG_INFO(L"Scan tab=%d done: %zu items in %lld ms",
-                static_cast<int>(tab),
-                results_[static_cast<size_t>(tab)].size(), static_cast<long long>(ms));
-    SetProgress(FormatW(L"扫描完成: %zu 项",
-                        results_[static_cast<size_t>(tab)].size()));
+    {
+        std::lock_guard<std::mutex> g(resultsMu_);   // REVIEW P1-1
+        results_[static_cast<size_t>(tab)] = std::move(buffer);
+        // M4: benchmark record (perf numbers come from the log).
+        MS_LOG_INFO(L"Scan tab=%d done: %zu items in %lld ms",
+                    static_cast<int>(tab),
+                    results_[static_cast<size_t>(tab)].size(),
+                    static_cast<long long>(ms));
+        SetProgress(FormatW(L"扫描完成: %zu 项",
+                            results_[static_cast<size_t>(tab)].size()));
+    }
     Post(hwnd, WM_APP_SCAN_DONE);
 }
 
@@ -142,7 +150,13 @@ SessionService::PlanStart SessionService::ExecutePlan(const CleanPlan& plan) {
 
 void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
     ExecuteReport rpt;
-    auto& items = results_[static_cast<size_t>(plan.tab)];
+    // REVIEW P1-1: the plan executes against a worker-private SNAPSHOT —
+    // the UI never shares this vector with the worker anymore.
+    std::vector<ScanItem> items;
+    {
+        std::lock_guard<std::mutex> g(resultsMu_);
+        items = results_[static_cast<size_t>(plan.tab)];
+    }
 
     // Whole-plan staleness: the result list changed since confirmation.
     if (!PlanBuilder::PlanMatches(plan, items)) {
@@ -160,12 +174,27 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
     int done = 0;
     const int total = static_cast<int>(plan.items.size());
 
+    // REVIEW P3 (08-F8): optional system restore point before the first
+    // migration — outcome lands in the report, failures degrade silently.
+    if (plan.tab == TabId::Apps && plan.createRestorePoint && total > 0) {
+        SetProgress(L"创建系统还原点…");
+        Post(hwnd, WM_APP_OP_PROGRESS, 0);
+        std::wstring rpNote;
+        if (CreateRestorePoint(L"MiniSys 应用迁移")) {
+            rpNote = L"✓ 已创建系统还原点（可在系统恢复中使用）\n";
+        } else {
+            rpNote = L"ℹ 未能创建系统还原点（系统策略限制或服务未启用），迁移继续。\n";
+        }
+        rpt.details += rpNote;
+    }
+
     for (const auto& pi : plan.items) {
         if (pi.itemIdx >= items.size()) continue;
         const auto& si = items[pi.itemIdx];
         ++done;
         SetProgress(FormatW(L"执行 %d/%d: %s", done, total, si.title.c_str()));
-        Post(hwnd, WM_APP_OP_PROGRESS);
+        Post(hwnd, WM_APP_OP_PROGRESS,
+             total > 0 ? static_cast<WPARAM>((done - 1) * 100 / total) : 0);
 
         std::wstring err;
         bool ok = false;
@@ -179,7 +208,8 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
             // Delegated system command (WinSxS/hiberfil — ADR-008). Not a
             // file operation; the command comes from the rule table only.
             SetProgress(FormatW(L"委派 %d/%d: %s", done, total, si.title.c_str()));
-            Post(hwnd, WM_APP_OP_PROGRESS);
+            Post(hwnd, WM_APP_OP_PROGRESS,
+                 total > 0 ? static_cast<WPARAM>((done - 1) * 100 / total) : 0);
             DelegateOp op(si.title, si.command);
             ok = op.Execute(err);
             if (ok) rpt.freedBytes += si.sizeBytes;
@@ -193,7 +223,17 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
                 continue;
             }
             if (plan.tab == TabId::Apps) {
-                // Target root is validated by MoveJunctionOp's preflight.
+                // Target root is validated by MoveJunctionOp's preflight;
+                // the GuardRails gate runs in Migration context (Program
+                // Files sources are legitimate — REVIEW P0-1).
+                auto verdict = GuardRails::Instance().Validate(
+                    pi, si, GuardRails::Context::Migration);
+                if (!verdict.allow) {
+                    ++rpt.skipped;
+                    rpt.details += FormatW(L"⊘ %s: %s\n", si.title.c_str(),
+                                           verdict.reason.c_str());
+                    continue;
+                }
                 fs::path target = fs::path(plan.migrateTargetRoot) / si.path.filename();
                 MoveJunctionOp op(si.path, target, plan.useSymlink);
                 ok = op.Execute(err);
@@ -214,16 +254,21 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
         }
     }
 
-    // Drop succeeded items from the result list so a refresh shows reality.
+    // Drop succeeded items from the live result list (by path — REVIEW
+    // P1-1: indices refer to the snapshot, the live list may differ).
     if (!succeededIdx.empty()) {
-        std::vector<bool> removed(items.size(), false);
-        for (size_t i : succeededIdx) removed[i] = true;
+        std::lock_guard<std::mutex> g(resultsMu_);
+        auto& live = results_[static_cast<size_t>(plan.tab)];
         std::vector<ScanItem> kept;
-        kept.reserve(items.size() - succeededIdx.size());
-        for (size_t i = 0; i < items.size(); ++i) {
-            if (!removed[i]) kept.push_back(std::move(items[i]));
+        kept.reserve(live.size());
+        for (auto& it : live) {
+            bool done = false;
+            for (size_t i : succeededIdx) {
+                if (i < items.size() && it.path == items[i].path) { done = true; break; }
+            }
+            if (!done) kept.push_back(std::move(it));
         }
-        items = std::move(kept);
+        live = std::move(kept);
     }
 
     {
@@ -244,60 +289,128 @@ bool SessionService::EmptyQuarantine() {
 }
 
 void SessionService::RunEmptyQuarantine(HWND hwnd) {
+    // REVIEW P1-7 (03-B7 / 05-T-B10): the old flow counted bytes even for
+    // drives that failed to empty, then marked EVERY record as released —
+    // the history lied while files were still on disk. Per-drive verdicts
+    // now decide which records get marked, and only their recorded sizes
+    // count as freed.
     ExecuteReport rpt;
     unsigned long long bytes = 0;
-    int roots = 0;
+    std::vector<wchar_t> emptiedDrives;
 
     for (const auto& drive : EnumerateDrives()) {
         fs::path root = fs::path(drive) / L"MiniSys.Quarantine";
         std::error_code ec;
         if (!fs::exists(root, ec)) continue;
-        ++roots;
-        bytes += DirectorySize(root);
         fs::remove_all(root, ec);
         if (ec) {
-            rpt.failed++;
-            rpt.details += FormatW(L"× 清空 %s 失败: %hs\n", root.wstring().c_str(),
-                                   ec.message().c_str());
+            ++rpt.failed;
+            rpt.details += FormatW(L"× 清空 %s 失败: %hs（文件仍在，可稍后重试）\n",
+                                   root.wstring().c_str(), ec.message().c_str());
+            continue;
         }
+        ++rpt.succeeded;
+        emptiedDrives.push_back(drive.empty() ? L'\0' : drive[0]);
     }
 
-    // Mark all successful quarantine records as purged.
-    for (const auto& r : OperationLog::Instance().LoadAll()) {
-        if (r.type == OpType::Quarantine && r.status == OpStatus::Success) {
-            OperationLog::Instance().UpdateStatus(
-                r.id, OpStatus::Success, L"[已释放] 隔离区已清空，文件已永久删除");
+    // Mark only records whose quarantine target lived on an emptied drive;
+    // their recorded sizes are the actually-freed bytes.
+    if (!emptiedDrives.empty()) {
+        std::vector<std::wstring> releasedIds;
+        unsigned long long freed = 0;
+        for (const auto& r : OperationLog::Instance().LoadAll()) {
+            if (r.type != OpType::Quarantine || r.status != OpStatus::Success) continue;
+            if (r.note.rfind(L"[已释放]", 0) == 0) continue;   // already purged
+            if (r.target.empty() || r.target[1] != L':') continue;
+            wchar_t d = static_cast<wchar_t>(::towupper(r.target[0]));
+            bool onEmptied = false;
+            for (wchar_t e : emptiedDrives) {
+                if (::towupper(e) == d) { onEmptied = true; break; }
+            }
+            if (onEmptied) {
+                releasedIds.push_back(r.id);
+                freed += r.sizeBytes;
+            }
         }
+        OperationLog::Instance().UpdateStatusBulk(
+            releasedIds, OpStatus::Success,
+            L"[已释放] 隔离区已清空，文件已永久删除");
+        bytes = freed;
     }
 
-    rpt.succeeded = roots;
     rpt.freedBytes = bytes;
     {
         std::lock_guard<std::mutex> g(reportMu_);
         lastReport_ = rpt;
     }
     SetProgress(FormatW(L"隔离区已清空: 释放 %s",
-                        FormatSize(bytes).c_str()));
+                        FormatSize(rpt.freedBytes).c_str()));
     Post(hwnd, WM_APP_OP_DONE);
 }
 
 std::wstring SessionService::QuarantineUsageText() const {
+    // REVIEW P1-7 (03-B7): purged records used to keep counting — the bar
+    // never returned to zero after "清空隔离区".
     unsigned long long bytes = 0;
     unsigned long long count = 0;
     for (const auto& r : OperationLog::Instance().LoadAll()) {
-        if (r.type == OpType::Quarantine && r.status == OpStatus::Success) {
-            ++count;
-            bytes += r.sizeBytes;
-        }
+        if (r.type != OpType::Quarantine || r.status != OpStatus::Success) continue;
+        if (r.note.rfind(L"[已释放]", 0) == 0) continue;   // already purged
+        ++count;
+        bytes += r.sizeBytes;
     }
     if (count == 0) return {};
     return FormatW(L"隔离区: %llu 项 / %s (清空后释放)", count,
                    FormatSize(bytes).c_str());
 }
 
+bool SessionService::UndoRecordsAsync(const std::vector<OpRecord>& records) {
+    if (records.empty()) return false;
+    SetProgress(FormatW(L"撤销中（%zu 项）…", records.size()));
+    HWND hwnd = hwnd_;
+    return StartTask(TaskKind::Executing, [this, records, hwnd]() {
+        ExecuteReport rpt;
+        int done = 0;
+        for (const auto& r : records) {
+            ++done;
+            SetProgress(FormatW(L"撤销 %d/%zu: %s", done, records.size(),
+                                r.source.c_str()));
+            Post(hwnd, WM_APP_OP_PROGRESS,
+                 records.empty() ? 0
+                     : static_cast<WPARAM>((done - 1) * 100 / records.size()));
+            std::wstring err;
+            switch (UndoRecord(r, err)) {
+                case UndoResult::Ok:
+                    ++rpt.succeeded;
+                    break;
+                case UndoResult::NotReversible:
+                    ++rpt.skipped;
+                    rpt.details += FormatW(L"⊘ %s: 该记录不可撤销\n", r.source.c_str());
+                    break;
+                case UndoResult::DeleteType:
+                    ++rpt.skipped;
+                    rpt.details += FormatW(L"⊘ %s: 回收站删除请手动还原\n",
+                                           r.source.c_str());
+                    break;
+                case UndoResult::Failed:
+                    ++rpt.failed;
+                    rpt.details += FormatW(L"× %s: %s\n", r.source.c_str(),
+                                           err.c_str());
+                    break;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> g(reportMu_);
+            lastReport_ = rpt;
+        }
+        SetProgress(FormatW(L"撤销完成: 成功 %d · 跳过 %d · 失败 %d",
+                            rpt.succeeded, rpt.skipped, rpt.failed));
+        Post(hwnd, WM_APP_OP_DONE);
+    });
+}
+
 SessionService::UndoResult SessionService::UndoRecord(const OpRecord& rec,
-                                                       std::wstring& errOut) {
-    if (!rec.isReversible || rec.status != OpStatus::Success) {
+                                                       std::wstring& errOut) {    if (!rec.isReversible || rec.status != OpStatus::Success) {
         return UndoResult::NotReversible;
     }
     if (rec.type == OpType::Quarantine) {

@@ -4,6 +4,7 @@
 #include "util/Logger.h"
 
 #include <windows.h>
+#include <cstdint>
 #include <algorithm>
 
 namespace fs = std::filesystem;
@@ -78,6 +79,16 @@ void FolderTreeScanner::Scan(std::vector<ScanItem>& out,
             item.sizeBytes = sz;
             item.detail    = drive;
             item.recommended = false;
+            // REVIEW P1-9 (05-T-B5): the folder-tree channel had no mtime
+            // snapshot, silently disabling the TOCTOU re-verification.
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(LongPath(dirPath).c_str(),
+                                     GetFileExInfoStandard, &fad)) {
+                item.lastWriteFiletime =
+                    (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+                    static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+                item.createTime = item.lastWriteFiletime;
+            }
             out.push_back(std::move(item));
             ++idx;
         }
