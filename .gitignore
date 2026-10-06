@@ -25,3 +25,5 @@ x86/
 *.VC.db
 *.VC.opendb
 ipch/
+.tmp-review2bench*
+.tmp-review2/
