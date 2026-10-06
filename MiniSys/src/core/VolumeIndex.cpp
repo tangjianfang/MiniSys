@@ -193,6 +193,13 @@ void VolumeIndex::Finalize() {
 bool VolumeIndex::EnsureBuilt(wchar_t drive,
                               const std::function<void(const std::wstring&)>& progress,
                               const std::atomic<bool>& cancel) {
+    if (forceFullNext_) {
+        // v2.10: explicit "重建索引" — skip the disk cache too, or the
+        // rebuild would resurrect the very index it is replacing.
+        forceFullNext_ = false;
+        valid_.store(false, std::memory_order_release);
+        return BuildFull(drive, progress, cancel);
+    }
     if (!(valid_ && drive == drive_)) {
         // v2.5: disk cache first — the journal refresh below brings it
         // current (or rejects it) exactly like an in-memory index.

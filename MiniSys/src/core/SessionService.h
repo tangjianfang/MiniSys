@@ -51,7 +51,9 @@ public:
 
     // v2.3: build/refresh the shared volume index on the worker thread
     // (powers the instant-search tab). Posts WM_APP_SCAN_* like a scan.
-    bool BuildIndexAsync();
+    // v2.10: forceRebuild = true first marks the index stale — the button
+    // must mean what it says even when the current index is "valid".
+    bool BuildIndexAsync(bool forceRebuild = false);
 
     // REVIEW-UI P1 (04-1/U-1): instant search runs ON THE WORKER — the
     // UI thread never touches the index containers. Cancels/queues behind

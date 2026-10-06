@@ -33,6 +33,15 @@ public:
                      const std::function<void(const std::wstring&)>& progress,
                      const std::atomic<bool>& cancel);
 
+    // v2.10: mark the index stale so the next EnsureBuilt performs a full
+    // rebuild ("重建索引" used to silently no-op on a valid-but-truncated
+    // index — EnsureBuilt only ever refreshed it incrementally). Also
+    // bypasses the disk cache for that one rebuild.
+    void Invalidate() {
+        valid_.store(false, std::memory_order_release);
+        forceFullNext_ = true;
+    }
+
     // REVIEW-UI 04-1: thread contract — all container access (build,
     // refresh, Search, subtree queries) happens on the SessionService
     // worker thread only. The UI thread touches NOTHING but the two
@@ -159,6 +168,7 @@ private:
     std::atomic<size_t> entryCount_{0};// nodes_.size() mirror (UI-readable)
     bool ready_ = false;   // lookups built — synthetic test indexes too (worker-only)
     bool walkBuilt_ = false;   // v2.6: filesystem-walk fallback index (worker-only)
+    bool forceFullNext_ = false;   // v2.10: Invalidate() → skip cache, BuildFull
     wchar_t drive_ = 0;
     uint64_t volumeSerial_ = 0;
     uint64_t journalId_ = 0;

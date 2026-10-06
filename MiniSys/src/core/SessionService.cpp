@@ -344,12 +344,14 @@ bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
     });
 }
 
-bool SessionService::BuildIndexAsync() {
+bool SessionService::BuildIndexAsync(bool forceRebuild) {
     if (IsBusy()) return false;
-    SetProgress(L"构建文件索引（约半分钟）…");
+    SetProgress(forceRebuild ? L"重建文件索引（全量）…"
+                             : L"构建文件索引（约半分钟）…");
     HWND hwnd = hwnd_;
-    bool ok = StartTask(TaskKind::Scanning, [this, hwnd]() {
+    bool ok = StartTask(TaskKind::Scanning, [this, forceRebuild, hwnd]() {
         auto& vi = VolumeIndex::Instance();
+        if (forceRebuild) vi.Invalidate();   // 重建 must actually rebuild
         auto sd = SystemDriveRoot();
         wchar_t drive = (sd.size() >= 2 && sd[1] == L':') ? sd[0] : L'C';
         vi.EnsureBuilt(drive,

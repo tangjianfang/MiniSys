@@ -36,7 +36,11 @@ namespace minisys {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"MiniSysMainWnd";
-constexpr wchar_t kWindowTitle[] = L"MiniSys — C 盘瘦身助手";
+// v2.10: the version lives in the TITLE now — "which build am I running"
+// confusion (old exe in build\Release vs verify dirs) cost a debugging
+// round. Bump alongside About + MiniSys.rc.
+constexpr wchar_t kAppVersion[] = L"v2.10";
+constexpr wchar_t kWindowTitle[] = L"MiniSys — C 盘瘦身助手 " L"v2.10";
 
 const wchar_t* TabName(TabId t) {
     switch (t) {
@@ -1019,8 +1023,11 @@ void MainWindow::OnScan() {
     auto scanner = ActivePresenter() ? ActivePresenter()->BuildScanner() : nullptr;
     if (!scanner) {
         // v2.3: on the search tab the scan button rebuilds the index.
-        if (CurrentTab() == TabId::Search && svc.BuildIndexAsync()) {
-            SetTaskBusy(TaskMode::Scanning);
+        // v2.10: FORCED — a "valid" but truncated index (the 703-entry
+        // defect) used to make this a silent no-op (EnsureBuilt refreshed
+        // incrementally and returned within milliseconds).
+        if (CurrentTab() == TabId::Search && svc.BuildIndexAsync(/*forceRebuild=*/true)) {
+            SetTaskBusy(TaskMode::Indexing);
         }
         return;
     }
@@ -1520,7 +1527,7 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.10";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  " L"v2.10";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
