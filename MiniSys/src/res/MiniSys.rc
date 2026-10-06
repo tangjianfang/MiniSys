@@ -21,7 +21,7 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "MiniSys"
-            VALUE "FileDescription", "MiniSys - C Drive Cleaner & Migrator"
+            VALUE "FileDescription", "MiniSys - Disk Cleaner & Migrator"
             VALUE "FileVersion", MINISYS_VERSION_STR
             VALUE "InternalName", "MiniSys"
             VALUE "LegalCopyright", "MIT License"

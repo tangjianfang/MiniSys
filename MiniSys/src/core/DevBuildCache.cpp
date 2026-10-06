@@ -1,5 +1,6 @@
 #include "core/DevBuildCache.h"
 
+#include "core/Settings.h"
 #include "util/DirSizeCache.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
@@ -143,14 +144,35 @@ std::vector<fs::path> SearchRoots() {
     auto profile = UserProfileDir();
     if (!profile.empty()) roots.push_back(profile);
 
-    // Conventional code roots (kept only when they exist).
-    auto sysRoot = SystemDriveRoot();   // "C:/"
-    for (const wchar_t* name : { L"src", L"code", L"dev", L"repos",
-                                 L"projects", L"work", L"github", L"golang" }) {
-        fs::path p = fs::path(sysRoot) / name;
-        std::error_code ec;
-        if (fs::is_directory(p, ec)) roots.push_back(p);
+    // v2.11 (磁盘瘦身助手): conventional code roots on EVERY fixed drive
+    // (projects rarely all live on C:), kept only when they exist.
+    static const wchar_t* kNames[] = { L"src", L"code", L"dev", L"repos",
+                                       L"projects", L"work", L"github",
+                                       L"golang" };
+    std::error_code ec;
+    for (const auto& root : EnumerateDrives()) {
+        for (const wchar_t* name : kNames) {
+            fs::path p = fs::path(root) / name;
+            if (fs::is_directory(p, ec)) roots.push_back(p);
+        }
     }
+
+    // User-configured extra roots (settings.json "devCacheRoots", ';'/','-
+    // separated).
+    std::wstring extras = Settings::Load().devCacheRoots;
+    std::wstring cur;
+    auto flush = [&](std::wstring& tok) {
+        if (tok.size() >= 2 && tok[1] == L':') {
+            fs::path p(tok);
+            if (fs::is_directory(p, ec)) roots.push_back(std::move(p));
+        }
+        tok.clear();
+    };
+    for (wchar_t ch : extras) {
+        if (ch == L';' || ch == L',') flush(cur);
+        else if (ch != L' ') cur += ch;
+    }
+    flush(cur);
     return roots;
 }
 

@@ -19,6 +19,9 @@ struct Settings {
     std::wstring lastSearchQuery;       // "ext:pdb readme" …
     bool searchMatchPath = false;
     int lastTab = 0;                    // TabId value
+    // v2.11 (磁盘瘦身助手): extra roots for the dev-build-cache scan, in
+    // addition to the auto-detected conventional ones on every fixed drive.
+    std::wstring devCacheRoots;         // "D:\\projects;E:\\code"
 
     static Settings Load();                    // %LOCALAPPDATA%\MiniSys\settings.json
     void Save() const;                         // atomic (temp + rename)

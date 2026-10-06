@@ -80,9 +80,62 @@ std::wstring NormKey(const std::wstring& path) {
 
 } // namespace
 
+// ---- v2.11: per-volume registry ---------------------------------------------
+
+std::mutex& VolumeIndex::RegistryMu() {
+    static std::mutex m;
+    return m;
+}
+std::map<wchar_t, std::unique_ptr<VolumeIndex>>& VolumeIndex::Registry() {
+    static std::map<wchar_t, std::unique_ptr<VolumeIndex>> reg;
+    return reg;
+}
+
+VolumeIndex& VolumeIndex::For(wchar_t drive) {
+    wchar_t d = ::towupper(drive);
+    std::lock_guard<std::mutex> g(RegistryMu());
+    auto& reg = Registry();
+    auto it = reg.find(d);
+    if (it == reg.end()) {
+        // make_unique can't reach the private ctor; in-class new can.
+        it = reg.emplace(d, std::unique_ptr<VolumeIndex>(new VolumeIndex()))
+                 .first;
+    }
+    return *it->second;
+}
+
+size_t VolumeIndex::TotalEntries() {
+    std::lock_guard<std::mutex> g(RegistryMu());
+    size_t n = 0;
+    for (const auto& kv : Registry()) n += kv.second->entryCount_.load();
+    return n;
+}
+
+size_t VolumeIndex::ValidVolumeCount() {
+    std::lock_guard<std::mutex> g(RegistryMu());
+    size_t n = 0;
+    for (const auto& kv : Registry()) {
+        if (kv.second->valid_.load()) ++n;
+    }
+    return n;
+}
+
+std::vector<VolumeIndex*> VolumeIndex::ValidVolumes() {
+    std::lock_guard<std::mutex> g(RegistryMu());
+    std::vector<VolumeIndex*> out;
+    for (const auto& kv : Registry()) {
+        if (kv.second->valid_.load()) out.push_back(kv.second.get());
+    }
+    return out;
+}
+
 VolumeIndex& VolumeIndex::Instance() {
-    static VolumeIndex inst;
-    return inst;
+    // v2.11: the system-drive volume (junk-scan acceleration + back-compat
+    // call sites). Unit tests: the sandbox via TestVolume() — Instance() no
+    // longer hands them a shared Meyers object.
+    auto sd = SystemDriveRoot();
+    wchar_t d = (sd.size() >= 2 && sd[1] == L':') ? sd[0] : L'C';
+    return For(d);
 }
 
 std::wstring VolumeIndex::NodeName(const Node& n, const std::wstring& names) {
@@ -966,13 +1019,17 @@ struct CacheRow {
 #pragma pack(pop)
 static_assert(sizeof(CacheRow) == 40, "cache row layout");
 
-std::filesystem::path CacheFilePath() {
-    return std::filesystem::path(AppDataDir()) / L"index-cache.bin";
+// v2.11: one cache file per volume — a multi-disk machine keeps each
+// volume's index independently hot (and Invalidate() can't resurrect a
+// sibling volume's data).
+std::filesystem::path CacheFilePath(wchar_t drive) {
+    return std::filesystem::path(AppDataDir()) /
+           (L"index-cache-" + std::wstring(1, ::towupper(drive)) + L".bin");
 }
 } // namespace
 
 bool VolumeIndex::TryLoadCache(wchar_t drive) {
-    auto path = CacheFilePath();
+    auto path = CacheFilePath(drive);
     FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
     if (!f) return false;
     bool ok = false;
@@ -1056,7 +1113,7 @@ void VolumeIndex::SaveCacheIfWorthwhile() const {
     if (walkBuilt_) return;   // walk-built indexes are session-only
     if (nodes_.size() < kMinCachedEntries) return;   // truncated indexes stay volatile
 
-    auto final = CacheFilePath();
+    auto final = CacheFilePath(drive_);
     auto tmp = final;
     tmp += L".tmp";
     FILE* f = _wfsopen(tmp.c_str(), L"wb", _SH_DENYWR);

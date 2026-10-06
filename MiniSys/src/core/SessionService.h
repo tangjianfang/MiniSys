@@ -53,7 +53,17 @@ public:
     // (powers the instant-search tab). Posts WM_APP_SCAN_* like a scan.
     // v2.10: forceRebuild = true first marks the index stale — the button
     // must mean what it says even when the current index is "valid".
+    // v2.11 (磁盘瘦身助手): indexes EVERY fixed drive.
     bool BuildIndexAsync(bool forceRebuild = false);
+
+    // v2.11: idle-time maintenance on the single worker (no second scan
+    // thread — that would reopen the races three review rounds closed):
+    //  1) USN journal delta refresh for every volume's index (near-zero I/O)
+    //  2) existence-verify each cached tab's rows THROUGH the index
+    //     (zero disk I/O) and prune ghosts
+    // The result: tabs open to fresh data without anyone re-running scans.
+    // Completion posts WM_APP_VERIFY_DONE per pruned tab (gen-stamped).
+    bool IdleMaintenanceAsync();
 
     // REVIEW-UI P1 (04-1/U-1): instant search runs ON THE WORKER — the
     // UI thread never touches the index containers. Cancels/queues behind

@@ -2,6 +2,9 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,7 +22,18 @@ namespace minisys {
 // callers fall back to FastWalk — behaviour equals v1.
 class VolumeIndex {
 public:
+    // v2.11 (identity change → 磁盘瘦身助手): one index per volume, all
+    // fixed disks by default. Instance() stays for the system-drive volume
+    // (and the unit-test sandbox); For(drive) is the registry entry point.
     static VolumeIndex& Instance();
+    static VolumeIndex& For(wchar_t drive);   // lazily created (worker-only)
+
+    // Aggregates over all indexed volumes (thread-safe; UI-readable).
+    static size_t TotalEntries();
+    static size_t ValidVolumeCount();
+    static bool AnyValid() { return ValidVolumeCount() > 0; }
+    // Valid volume instances for merged searches (worker-only; snapshot).
+    static std::vector<VolumeIndex*> ValidVolumes();
 
     struct FileEntry {
         std::wstring path;        // full path
@@ -122,6 +136,10 @@ public:
 
 private:
     VolumeIndex() = default;
+
+    // v2.11: per-volume registry (For/TotalEntries/ValidVolumeCount).
+    static std::mutex& RegistryMu();
+    static std::map<wchar_t, std::unique_ptr<VolumeIndex>>& Registry();
 
     struct Node {
         uint64_t frn = 0;

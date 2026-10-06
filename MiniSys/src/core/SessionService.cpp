@@ -346,30 +346,38 @@ bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
 
 bool SessionService::BuildIndexAsync(bool forceRebuild) {
     if (IsBusy()) return false;
-    SetProgress(forceRebuild ? L"重建文件索引（全量）…"
-                             : L"构建文件索引（约半分钟）…");
+    SetProgress(forceRebuild ? L"重建文件索引（全量，所有固定磁盘）…"
+                             : L"构建文件索引（所有固定磁盘）…");
     HWND hwnd = hwnd_;
     bool ok = StartTask(TaskKind::Scanning, [this, forceRebuild, hwnd]() {
-        auto& vi = VolumeIndex::Instance();
-        if (forceRebuild) vi.Invalidate();   // 重建 must actually rebuild
-        auto sd = SystemDriveRoot();
-        wchar_t drive = (sd.size() >= 2 && sd[1] == L':') ? sd[0] : L'C';
-        vi.EnsureBuilt(drive,
-            [this, hwnd](const std::wstring& msg) {
-                SetProgress(L"索引: " + msg);
-                Post(hwnd, WM_APP_SCAN_PROGRESS);
-            },
-            cancelScan_);
+        // v2.11 (磁盘瘦身助手): index EVERY fixed drive, not just the
+        // system volume — search covers all disks now.
+        int built = 0, failed = 0;
+        for (const auto& root : EnumerateDrives()) {
+            if (cancelScan_.load()) break;
+            wchar_t d = ::towupper(root.empty() ? L'C' : root[0]);
+            auto& vi = VolumeIndex::For(d);
+            if (forceRebuild) vi.Invalidate();   // 重建 must actually rebuild
+            vi.EnsureBuilt(d,
+                [this, hwnd, d](const std::wstring& msg) {
+                    SetProgress(FormatW(L"索引 %c: %s", d, msg.c_str()));
+                    Post(hwnd, WM_APP_SCAN_PROGRESS);
+                },
+                cancelScan_);
+            if (vi.IsValid()) ++built;
+            else ++failed;
+        }
+        size_t total = VolumeIndex::TotalEntries();
         bool cancelled = cancelScan_.load();
-        // REVIEW-UI P1 (L-5): "此磁盘不支持" used to be shown even when the
-        // user cancelled the build themselves — distinguish the three cases.
-        if (vi.IsValid()) {
-            SetProgress(FormatW(L"索引就绪: %s 项",
-                                FormatCountSimple(vi.EntryCount()).c_str()));
-        } else if (cancelled) {
+        // REVIEW-UI P1 (L-5): distinguish cancelled / partial / ok.
+        if (cancelled && built == 0) {
             SetProgress(L"ℹ 已取消索引构建，下次进入文件搜索将继续");
+        } else if (total > 0) {
+            SetProgress(FormatW(L"索引就绪: %s 项（%d 个磁盘%s）",
+                                FormatCountSimple(total).c_str(), built,
+                                failed ? L"，部分磁盘不支持已回退遍历" : L""));
         } else {
-            SetProgress(L"索引不可用（此磁盘不支持或被策略限制），垃圾扫描仍可用（较慢）");
+            SetProgress(L"索引不可用（磁盘不支持或被策略限制），垃圾扫描仍可用（较慢）");
         }
         Post(hwnd, WM_APP_SCAN_DONE);
     });
@@ -389,13 +397,84 @@ std::wstring SessionService::FormatCountSimple(size_t n) {
 }
 
 // REVIEW-UI P1 (04-1 + U-1): the whole search pipeline runs on the worker.
+// v2.11: see header. Runs as TaskKind::Verifying — read-only, so the UI
+// matrix stays usable while it works (same reasoning as verify/preview).
+bool SessionService::IdleMaintenanceAsync() {
+    if (IsBusy()) return false;
+    SetProgress(L"空闲维护：增量刷新索引…");
+    HWND hwnd = hwnd_;
+    return StartTask(TaskKind::Verifying, [this, hwnd]() {
+        // 1) journal deltas for every built volume (cheap by design —
+        // EnsureBuilt revalidates serial + reads only new USN records).
+        size_t refreshed = 0;
+        for (const auto& root : EnumerateDrives()) {
+            if (cancelScan_.load()) break;
+            wchar_t d = ::towupper(root.empty() ? L'C' : root[0]);
+            auto& vi = VolumeIndex::For(d);
+            if (!vi.IsValid()) continue;
+            vi.EnsureBuilt(d, nullptr, cancelScan_);
+            ++refreshed;
+        }
+
+        // 2) ghost-row prune for every cached tab, existence checked
+        // THROUGH the index (no per-path disk hits). Posts one
+        // WM_APP_VERIFY_DONE per pruned tab so the UI applies them in order.
+        size_t prunedTabs = 0, prunedRows = 0;
+        for (int t = 0; t < static_cast<int>(TabId::Count); ++t) {
+            auto tab = static_cast<TabId>(t);
+            if (tab == TabId::History || tab == TabId::Search) continue;
+            auto items = Results(tab);
+            if (items.empty()) continue;
+            std::vector<std::wstring> dead;
+            for (const auto& it : items) {
+                if (it.path.empty() || it.path == L"$RECYCLE.BIN") continue;
+                auto p = it.path.wstring();
+                if (p.size() < 2 || p[1] != L':') continue;
+                auto& vi = VolumeIndex::For(::towupper(p[0]));
+                if (!vi.IsValid()) continue;   // volume unknown → leave it
+                VolumeIndex::FileEntry fe;
+                if (!vi.TryGetEntry(p, fe)) dead.push_back(ToLower(p));
+            }
+            if (dead.empty()) continue;
+            // Prune the service-side list (the presenter's VERIFY_DONE
+            // application covers the visible copy).
+            std::vector<ScanItem> kept;
+            kept.reserve(items.size());
+            size_t removed = 0;
+            for (auto& it : items) {
+                if (it.path == L"$RECYCLE.BIN" ||
+                    std::find(dead.begin(), dead.end(),
+                              ToLower(it.path.wstring())) == dead.end()) {
+                    kept.push_back(std::move(it));
+                } else {
+                    ++removed;
+                }
+            }
+            StoreResults(tab, std::move(kept));
+            {
+                std::lock_guard<std::mutex> g(verifyMu_);
+                lastDead_ = std::move(dead);
+                lastVerifyTab_ = tab;
+            }
+            ++prunedTabs;
+            prunedRows += removed;
+            Post(hwnd, WM_APP_VERIFY_DONE);
+        }
+
+        SetProgress(prunedTabs
+            ? FormatW(L"空闲维护完成: %zu 个磁盘已增量刷新，清理 %zu 个失效项",
+                      refreshed, prunedRows)
+            : FormatW(L"空闲维护完成: %zu 个磁盘已增量刷新", refreshed));
+        Post(hwnd, WM_APP_SCAN_PROGRESS);
+    });
+}
+
 bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
     if (IsBusy()) return false;
     SetProgress(query.empty() ? L"搜索" : L"搜索: " + query);
     HWND hwnd = hwnd_;
     return StartTask(TaskKind::Searching, [this, query, matchPath, hwnd]() {
         std::vector<ScanItem> items;
-        auto& vi = VolumeIndex::Instance();
         if (!query.empty()) {
             // v2.5: Everything-style in-query filters ("folder:", "file:",
             // "ext:cpp;h") are matched inside the index scan.
@@ -404,23 +483,28 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
             constexpr size_t kMaxResults = 1000;
             constexpr size_t kSizeFetchRows = 150;
             items.reserve(256);
-            vi.Search(freeQuery, matchPath, kMaxResults,
-                [&](const VolumeIndex::SearchHit& hit) {
-                    ScanItem it;
-                    std::filesystem::path p(hit.path);
-                    it.category    = hit.isDirectory ? L"文件夹" : L"文件";
-                    it.title       = hit.name;
-                    it.path        = p;
-                    it.sizeBytes   = 0;      // lazy pass below
-                    it.lastWriteFiletime = hit.lastWrite;
-                    it.createTime  = hit.lastWrite;
-                    it.detail      = p.parent_path().wstring();
-                    it.recommended = false;
-                    it.riskLevel   = RiskLevel::Cautious;   // unclassified
-                    items.push_back(std::move(it));
-                    return !cancelScan_.load();   // stop on new keystroke
-                },
-                filter);
+            // v2.11 (磁盘瘦身助手): merged search over EVERY indexed
+            // volume, one shared result budget.
+            auto sink = [&](const VolumeIndex::SearchHit& hit) {
+                ScanItem it;
+                std::filesystem::path p(hit.path);
+                it.category    = hit.isDirectory ? L"文件夹" : L"文件";
+                it.title       = hit.name;
+                it.path        = p;
+                it.sizeBytes   = 0;      // lazy pass below
+                it.lastWriteFiletime = hit.lastWrite;
+                it.createTime  = hit.lastWrite;
+                it.detail      = p.parent_path().wstring();
+                it.recommended = false;
+                it.riskLevel   = RiskLevel::Cautious;   // unclassified
+                items.push_back(std::move(it));
+                return !cancelScan_.load();   // stop on new keystroke
+            };
+            for (VolumeIndex* vi : VolumeIndex::ValidVolumes()) {
+                if (items.size() >= kMaxResults) break;
+                vi->Search(freeQuery, matchPath, kMaxResults - items.size(),
+                           sink, filter);
+            }
             // Lazy size fetch for the top rows (ADR-004: the index carries
             // no sizes). Cancellation checked per row.
             WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -434,7 +518,7 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
                 }
             }
         }
-        size_t total = vi.IsValid() ? vi.EntryCount() : 0;
+        size_t total = VolumeIndex::TotalEntries();
         StoreResults(TabId::Search, std::move(items));
         // v2.9: persist the search results (throttled — a search runs per
         // keystroke) so the next session reopens straight into them, query

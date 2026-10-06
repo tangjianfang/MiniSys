@@ -39,6 +39,8 @@ Settings Settings::Load() {
     s.lastSearchQuery = j.Get(L"lastSearchQuery").AsString();
     s.searchMatchPath = j.Get(L"searchMatchPath").AsBool(false);
     s.lastTab = static_cast<int>(j.Get(L"lastTab").AsInt(0));
+    // v2.11: user-added dev-cache roots.
+    s.devCacheRoots = j.Get(L"devCacheRoots").AsString();
     const Json& ex = j.Get(L"exclusions");
     if (ex.IsArray()) {
         for (size_t i = 0; i < ex.Size(); ++i) {
@@ -59,6 +61,7 @@ void Settings::Save() const {
     j.Set(L"lastSearchQuery", Json(lastSearchQuery));
     j.Set(L"searchMatchPath", Json(searchMatchPath));
     j.Set(L"lastTab", Json(static_cast<double>(lastTab)));
+    j.Set(L"devCacheRoots", Json(devCacheRoots));
     Json arr = Json::Array();
     for (const auto& e : exclusions) arr.Push(Json(e));
     j.Set(L"exclusions", arr);

@@ -532,8 +532,8 @@ std::unique_ptr<Scanner> SearchPresenter::BuildScanner() {
 }
 
 size_t SearchPresenter::TotalIndexed() const {
-    auto& vi = VolumeIndex::Instance();
-    return vi.IsValid() ? vi.EntryCount() : 0;
+    // v2.11: total across ALL indexed volumes.
+    return VolumeIndex::AnyValid() ? VolumeIndex::TotalEntries() : 0;
 }
 
 // REVIEW-UI P1 (04-1/U-1): the whole search pipeline now runs on the
