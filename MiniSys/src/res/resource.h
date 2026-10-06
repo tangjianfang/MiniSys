@@ -40,6 +40,9 @@
 #define IDC_EDIT_SEARCH             2022
 #define IDC_CHK_MATCHPATH           2023
 #define TIMER_SEARCH_DEBOUNCE       2
+#define TIMER_SEARCH_RETRY          3     // retry while a previous search drains
+// v2.4 (REVIEW-UI P1): async search completion
+#define WM_APP_SEARCH_DONE          (WM_APP + 6)
 // Context menu on the list (REVIEW P2)
 #define IDM_LIST_OPEN               3002
 #define IDM_LIST_INFO               3003

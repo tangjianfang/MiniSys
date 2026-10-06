@@ -33,9 +33,13 @@ public:
                      const std::function<void(const std::wstring&)>& progress,
                      const std::atomic<bool>& cancel);
 
-    bool IsValid() const { return valid_; }
+    // REVIEW-UI 04-1: thread contract — all container access (build,
+    // refresh, Search, subtree queries) happens on the SessionService
+    // worker thread only. The UI thread touches NOTHING but the two
+    // atomics below (status display / gating).
+    bool IsValid() const { return valid_.load(std::memory_order_acquire); }
     wchar_t Drive() const { return drive_; }
-    size_t EntryCount() const { return nodes_.size(); }
+    size_t EntryCount() const { return entryCount_.load(std::memory_order_acquire); }
 
     // Case-insensitive directory lookup by full path ("c:\windows\system32").
     bool HasDir(const std::wstring& dirPath) const;
@@ -118,8 +122,9 @@ private:
     void WalkSubtree(const Node& dir, const std::wstring& dirPath,
                      const std::function<void(const FileEntry&)>& cb) const;
 
-    bool valid_ = false;   // volume-backed (EnsureBuilt succeeded)
-    bool ready_ = false;   // lookups built — synthetic test indexes too
+    std::atomic<bool> valid_{false};   // volume-backed (UI-readable)
+    std::atomic<size_t> entryCount_{0};// nodes_.size() mirror (UI-readable)
+    bool ready_ = false;   // lookups built — synthetic test indexes too (worker-only)
     wchar_t drive_ = 0;
     uint64_t volumeSerial_ = 0;
     uint64_t journalId_ = 0;

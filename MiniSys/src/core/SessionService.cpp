@@ -62,8 +62,9 @@ std::vector<ScanItem> SessionService::Results(TabId tab) const {
     return results_[static_cast<size_t>(tab)];
 }
 
-std::vector<ScanItem>& SessionService::MutableResults(TabId tab) {
-    return results_[static_cast<size_t>(tab)];
+void SessionService::StoreResults(TabId tab, std::vector<ScanItem> items) {
+    std::lock_guard<std::mutex> g(resultsMu_);
+    results_[static_cast<size_t>(tab)] = std::move(items);
 }
 
 bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
@@ -73,16 +74,31 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
     }
     if (worker_.joinable()) worker_.join();
     cancelScan_.store(false);
-    worker_ = std::thread([this, body = std::move(body)]() mutable {
+    worker_ = std::thread([this, kind, body = std::move(body)]() mutable {
         // Shell operations (IFileOperation) need COM on this thread.
         bool com = SUCCEEDED(CoInitializeEx(nullptr,
                           COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE));
+        bool threw = false;
         try {
             body();
         } catch (const std::exception& ex) {
             MS_LOG_ERROR(L"Task threw: %hs", ex.what());
+            threw = true;
         } catch (...) {
             MS_LOG_ERROR(L"Task threw unknown exception");
+            threw = true;
+        }
+        // REVIEW-UI P1 (04-5): an exception used to skip the task's own
+        // DONE post, leaving the UI's task matrix locked forever. Always
+        // post the completion message for the task kind.
+        if (threw && hwnd_) {
+            SetProgress(L"⚠ 任务异常中断（详见日志）");
+            PostMessageW(hwnd_,
+                kind == TaskKind::Scanning ? WM_APP_SCAN_DONE
+                                           : (kind == TaskKind::Searching
+                                                  ? WM_APP_SEARCH_DONE
+                                                  : WM_APP_OP_DONE),
+                0, 0);
         }
         if (com) CoUninitialize();
         taskKind_.store(static_cast<int>(TaskKind::None));
@@ -103,7 +119,7 @@ bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
 
 bool SessionService::BuildIndexAsync() {
     if (IsBusy()) return false;
-    SetProgress(L"构建文件索引…");
+    SetProgress(L"构建文件索引（约半分钟）…");
     HWND hwnd = hwnd_;
     bool ok = StartTask(TaskKind::Scanning, [this, hwnd]() {
         auto& vi = VolumeIndex::Instance();
@@ -115,12 +131,86 @@ bool SessionService::BuildIndexAsync() {
                 Post(hwnd, WM_APP_SCAN_PROGRESS);
             },
             cancelScan_);
-        SetProgress(vi.IsValid()
-            ? FormatW(L"索引就绪: %zu 项", vi.EntryCount())
-            : L"索引不可用（此磁盘不支持或被策略限制），垃圾扫描仍可用（较慢）");
+        bool cancelled = cancelScan_.load();
+        // REVIEW-UI P1 (L-5): "此磁盘不支持" used to be shown even when the
+        // user cancelled the build themselves — distinguish the three cases.
+        if (vi.IsValid()) {
+            SetProgress(FormatW(L"索引就绪: %s 项",
+                                FormatCountSimple(vi.EntryCount()).c_str()));
+        } else if (cancelled) {
+            SetProgress(L"ℹ 已取消索引构建，下次进入文件搜索将继续");
+        } else {
+            SetProgress(L"索引不可用（此磁盘不支持或被策略限制），垃圾扫描仍可用（较慢）");
+        }
         Post(hwnd, WM_APP_SCAN_DONE);
     });
     return ok;
+}
+
+// REVIEW-UI P1: thousands separator for index counts ("1,234,567").
+std::wstring SessionService::FormatCountSimple(size_t n) {
+    std::wstring raw = std::to_wstring(n);
+    std::wstring out;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        size_t fromEnd = raw.size() - i;
+        out += raw[i];
+        if (fromEnd > 1 && (fromEnd - 1) % 3 == 0) out += L',';
+    }
+    return out;
+}
+
+// REVIEW-UI P1 (04-1 + U-1): the whole search pipeline runs on the worker.
+bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
+    if (IsBusy()) return false;
+    SetProgress(query.empty() ? L"搜索" : L"搜索: " + query);
+    HWND hwnd = hwnd_;
+    return StartTask(TaskKind::Searching, [this, query, matchPath, hwnd]() {
+        std::vector<ScanItem> items;
+        auto& vi = VolumeIndex::Instance();
+        if (!query.empty()) {
+            constexpr size_t kMaxResults = 1000;
+            constexpr size_t kSizeFetchRows = 150;
+            items.reserve(256);
+            vi.Search(query, matchPath, kMaxResults,
+                [&](const VolumeIndex::SearchHit& hit) {
+                    ScanItem it;
+                    std::filesystem::path p(hit.path);
+                    it.category    = hit.isDirectory ? L"文件夹" : L"文件";
+                    it.title       = hit.name;
+                    it.path        = p;
+                    it.sizeBytes   = 0;      // lazy pass below
+                    it.lastWriteFiletime = hit.lastWrite;
+                    it.createTime  = hit.lastWrite;
+                    it.detail      = p.parent_path().wstring();
+                    it.recommended = false;
+                    it.riskLevel   = RiskLevel::Cautious;   // unclassified
+                    items.push_back(std::move(it));
+                    return !cancelScan_.load();   // stop on new keystroke
+                });
+            // Lazy size fetch for the top rows (ADR-004: the index carries
+            // no sizes). Cancellation checked per row.
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            for (size_t i = 0; i < items.size() && i < kSizeFetchRows; ++i) {
+                if (cancelScan_.load()) break;
+                if (GetFileAttributesExW(LongPath(items[i].path).c_str(),
+                                         GetFileExInfoStandard, &fad)) {
+                    items[i].sizeBytes =
+                        (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
+                        static_cast<unsigned long long>(fad.nFileSizeLow);
+                }
+            }
+        }
+        size_t total = vi.IsValid() ? vi.EntryCount() : 0;
+        StoreResults(TabId::Search, std::move(items));
+        SetProgress(cancelScan_.load()
+            ? L"搜索已取消（有新输入）"
+            : FormatW(L"匹配 %s 项（索引共 %s 项）",
+                      FormatCountSimple(
+                          Results(TabId::Search).size()).c_str(),
+                      FormatCountSimple(total).c_str()));
+        Post(hwnd, WM_APP_SEARCH_DONE);
+    });
+    return true;
 }
 
 void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd) {    std::vector<ScanItem> buffer;

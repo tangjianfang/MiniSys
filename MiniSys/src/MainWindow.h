@@ -27,8 +27,9 @@ private:
     // for the current task state — the old per-handler EnableWindow calls
     // left sort buttons / column clicks / tab switches live while the
     // worker mutated the results vector.
-    enum class TaskMode { None, Scanning, Executing };
+    enum class TaskMode { None, Scanning, Indexing, Executing };
     void SetTaskBusy(TaskMode mode);
+    void RunSearch();   // REVIEW-UI P1: worker-side search dispatch
 
     void OnCreate();
     void OnSize();
@@ -68,6 +69,7 @@ private:
     bool useSymlink_ = false;
     TaskMode taskMode_ = TaskMode::None;
     Settings settings_;                       // REVIEW P2: persisted state
+    std::wstring tabInfoText_;                // REVIEW-UI P1 (L-3): static per-tab description
 };
 
 } // namespace minisys

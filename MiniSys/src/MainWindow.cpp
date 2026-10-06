@@ -152,8 +152,17 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                        nm->code == LVN_ITEMCHANGED &&
                        taskMode_ == TaskMode::None) {
                 // Live "执行选中操作（N 项 · X）" (REVIEW P0-6).
+                // REVIEW-UI P1 (L-6/04-7): react only when the CHECK IMAGE
+                // actually flipped — selection-only changes and batch
+                // renders must not trigger the O(N) recount.
                 auto* nmlv = reinterpret_cast<LPNMLISTVIEW>(lp);
-                if (nmlv->uChanged & LVIF_STATE) UpdateExecButton();
+                bool checkFlipped =
+                    (nmlv->uChanged & LVIF_STATE) &&
+                    ((nmlv->uNewState ^ nmlv->uOldState) & LVIS_STATEIMAGEMASK);
+                auto* lp2 = dynamic_cast<ListTabPresenter*>(ActivePresenter());
+                if (checkFlipped && !(lp2 && lp2->InBatchUpdate())) {
+                    UpdateExecButton();
+                }
             } else if (nm->hwndFrom == h_.list &&
                        nm->code == LVN_ITEMACTIVATE) {
                 // REVIEW P1-6: double-click = "why is this here" panel.
@@ -239,12 +248,8 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == IDC_CHK_MATCHPATH) {
-                if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
-                    wchar_t buf[512] = {};
-                    GetWindowTextW(h_.editSearch, buf, 512);
-                    sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
-                    UpdateSearchStatus();
-                }
+                // REVIEW-UI P1 (04-2): gated like the debounce timer.
+                if (taskMode_ == TaskMode::None) RunSearch();
                 return 0;
             }
             switch (LOWORD(wp)) {
@@ -312,22 +317,36 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_TASK_STARTED:
             // An ExecutePlan launched outside OnExecute (folder-tree right
             // click) — lock the action matrix for it.
-            SetTaskBusy(TaskMode::Executing);
-            UpdateStatusBar();
+            // REVIEW-UI P1 (04-4): gate on IsBusy — if the worker already
+            // finished (its OP_DONE was queued first), locking now would
+            // deadlock the matrix forever.
+            if (SessionService::Instance().IsBusy()) {
+                SetTaskBusy(TaskMode::Executing);
+                UpdateStatusBar();
+            }
             return 0;
         case WM_APP_OP_DONE:
             OnPlanDone();
+            return 0;
+        case WM_APP_SEARCH_DONE:
+            // REVIEW-UI P1 (04-1/U-1): async search completed on the worker.
+            if (CurrentTab() == TabId::Search) {
+                if (auto* p = ActivePresenter()) p->Refresh();
+                UpdateSearchStatus();
+            }
+            UpdateStatusBar();
             return 0;
         case WM_TIMER:
             // v2.3: search debounce elapsed — apply the query.
             if (wp == TIMER_SEARCH_DEBOUNCE) {
                 KillTimer(hwnd_, TIMER_SEARCH_DEBOUNCE);
-                if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
-                    wchar_t buf[512] = {};
-                    GetWindowTextW(h_.editSearch, buf, 512);
-                    sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
-                    UpdateSearchStatus();
-                }
+                // REVIEW-UI P1 (04-2): never touch the snapshot/results from
+                // a timer while any task is live.
+                if (taskMode_ == TaskMode::None) RunSearch();
+            } else if (wp == TIMER_SEARCH_RETRY) {
+                // A previous search was still draining — try again.
+                KillTimer(hwnd_, TIMER_SEARCH_RETRY);
+                if (taskMode_ == TaskMode::None) RunSearch();
             }
             return 0;
         case WM_CLOSE:
@@ -435,49 +454,59 @@ void MainWindow::OnTabChanged() {
 
     if (auto* p = ActivePresenter()) p->OnActivate();
 
+    // REVIEW-UI P1 (L-25): the scan button on the search tab rebuilds the
+    // index — relabel it.
+    SetWindowTextW(h_.scan, t == TabId::Search ? L"重建索引" : L"扫描");
+
+    // REVIEW-UI P1 (L-3): remember the static per-tab description so
+    // OnScanDone can compose dashboard + notices + description in order.
     switch (t) {
         case TabId::Junk:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"扫描系统/浏览器/开发缓存等可清理项；勾选后执行将移入隔离区，可在“操作历史”一键还原。\n"
-                L"⚠ 危险项（清空回收站、WinSxS 等）默认不勾选；“清空隔离区”后才真正释放空间。");
+                L"⚠ 危险项（清空回收站、WinSxS 等）默认不勾选；“清空隔离区”后才真正释放空间。";
             break;
         case TabId::Search:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"输入即搜（多词为“并且”，支持 * ? 通配符）；双击定位文件，勾选后可移入隔离区。\n"
-                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建。");
-            // v2.3: auto-build the index on first visit.
-            if (!VolumeIndex::Instance().IsValid() &&
-                !SessionService::Instance().IsBusy()) {
-                if (SessionService::Instance().BuildIndexAsync()) {
-                    SetTaskBusy(TaskMode::Scanning);
-                }
-            } else if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
-                wchar_t buf[512] = {};
-                GetWindowTextW(h_.editSearch, buf, 512);
-                sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
-            }
+                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；索引未就绪时会自动构建。";
             break;
         case TabId::LargeFiles:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"按最小大小、文件类型（.ext;..）与磁盘过滤查找大文件与重复文件；点列标题或排序按钮排序。\n"
-                L"⚠ 重复文件默认保留最新一份、预选其余副本；执行前会复验文件是否已变化。");
+                L"⚠ 重复文件默认保留最新一份、预选其余副本；执行前会复验文件是否已变化。";
             break;
         case TabId::Apps:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"扫描 C 盘已安装应用；先点“选择迁移目标盘…”，勾选后执行迁移，原位置以 Junction 保持可用。\n"
-                L"⚠ 迁移前自动检查目标空间与文件占用；UWP/商店应用不支持迁移，已自动排除。");
+                L"⚠ 迁移前自动检查目标空间与文件占用；UWP/商店应用不支持迁移，已自动排除。";
             break;
         case TabId::FolderTree:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"按磁盘显示顶层文件夹及其大小，快速定位空间大户。\n"
-                L"⚠ 右键文件夹可移入隔离区（可撤销），系统目录受保护名单拦截。");
+                L"⚠ 右键文件夹可移入隔离区（可撤销），系统目录受保护名单拦截。";
             break;
         case TabId::History:
-            SetWindowTextW(h_.info,
+            tabInfoText_ =
                 L"操作历史：迁移与隔离区操作可一键撤销；“清空隔离区”将永久删除并释放空间。\n"
-                L"⚠ 撤销时若原路径已被占用，文件将还原为 *.restored。");
+                L"⚠ 撤销时若原路径已被占用，文件将还原为 *.restored。";
             break;
-        default: break;
+        default: tabInfoText_.clear(); break;
+    }
+    SetWindowTextW(h_.info, tabInfoText_.c_str());
+
+    if (t == TabId::Search) {
+        // v2.3: auto-build the index on first visit.
+        // REVIEW-UI P1 (L-5): Indexing mode — tabs stay switchable.
+        if (!VolumeIndex::Instance().IsValid() &&
+            !SessionService::Instance().IsBusy()) {
+            if (SessionService::Instance().BuildIndexAsync()) {
+                SetTaskBusy(TaskMode::Indexing);
+            }
+        } else {
+            // Index ready — re-apply whatever is in the box.
+            RunSearch();
+        }
     }
     if (auto* p = ActivePresenter()) p->Refresh();
     UpdateStatusBar();
@@ -575,39 +604,22 @@ void MainWindow::OnScanDone() {
     if (auto* p = ActivePresenter()) p->OnScanDone();
     // v2.3: after an index build, re-apply the pending search query.
     if (t == TabId::Search) {
-        if (auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter())) {
-            wchar_t buf[512] = {};
-            GetWindowTextW(h_.editSearch, buf, 512);
-            sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+        if (VolumeIndex::Instance().IsValid()) {
+            RunSearch();   // REVIEW-UI P1: worker-side re-filter
+        } else {
+            UpdateSearchStatus();
         }
-        UpdateSearchStatus();
         UpdateStatusBar();
+        UpdateExecButton();
         return;
     }
-    if (t != TabId::History && svc.Results(t).empty()) {
-        SetWindowTextW(h_.info, L"✓ 未发现可处理项，系统状况良好。");
-    }
 
-    // REVIEW P1-5 (07-X10 / 05-T-C3): silent degradation made visible. The
-    // external rules and the USN index failed on the user's machine for a
-    // week without any indication.
-    std::wstring degrade;
-    if (t == TabId::Junk) {
-        const auto& rl = JunkRules::LastLoad();
-        if (!rl.usedExternal && !rl.externalError.empty()) {
-            degrade += L"\nℹ 外置规则不可用（" + rl.externalError + L"），已使用内置规则。";
-        } else if (!rl.rejected.empty()) {
-            degrade += FormatW(L"\nℹ 已拒绝 %zu 条不安全的外置规则（详见日志）。",
-                               rl.rejected.size());
-        }
-        if (!VolumeIndex::Instance().IsValid()) {
-            degrade += L"\nℹ 快速索引未启用，本次为全量扫描（较慢）。";
-        }
-    }
-    if (!degrade.empty()) {
-        wchar_t cur[1024] = {};
-        GetWindowTextW(h_.info, cur, 1024);
-        SetWindowTextW(h_.info, (std::wstring(cur) + degrade).c_str());
+    // REVIEW-UI P1 (L-3): compose the info area fresh — dashboard first,
+    // then degradation notices, then the static tab description. The old
+    // "append to the tail" order put the notices below the 3-line fold.
+    std::wstring composed;
+    if (t != TabId::History && svc.Results(t).empty()) {
+        composed += L"✓ 未发现可处理项，系统状况良好。\n";
     }
 
     // REVIEW P2 (08-F6): one-line dashboard after a junk scan.
@@ -622,34 +634,67 @@ void MainWindow::OnScanDone() {
                 else if (it.riskLevel == RiskLevel::Cautious) { cautious += 1; cautiousB += it.sizeBytes; }
             }
             if (!items.empty()) {
-                std::wstring dash = FormatW(
-                    L"可释放：安全 %llu 项 / %s，谨慎 %llu 项 / %s（勾选后执行，进入隔离区）",
+                composed += FormatW(
+                    L"可释放：安全 %llu 项 / %s，谨慎 %llu 项 / %s（勾选后执行，进入隔离区）\n",
                     safe, FormatSize(safeB).c_str(),
                     cautious, FormatSize(cautiousB).c_str());
-                wchar_t cur[1024] = {};
-                GetWindowTextW(h_.info, cur, 1024);
-                SetWindowTextW(h_.info, (dash + L"\n" + cur).c_str());
             }
         }
     }
+
+    // REVIEW P1-5 (07-X10 / 05-T-C3): silent degradation made visible —
+    // now placed BEFORE the static description so it stays above the fold.
+    if (t == TabId::Junk) {
+        const auto& rl = JunkRules::LastLoad();
+        if (!rl.usedExternal && !rl.externalError.empty()) {
+            composed += L"ℹ 外置规则不可用（" + rl.externalError + L"），已使用内置规则。\n";
+        } else if (!rl.rejected.empty()) {
+            composed += FormatW(L"ℹ 已拒绝 %zu 条不安全的外置规则（详见日志）。\n",
+                                rl.rejected.size());
+        }
+        if (!VolumeIndex::Instance().IsValid()) {
+            composed += L"ℹ 快速索引未启用，本次为全量扫描（较慢）。\n";
+        }
+        // REVIEW-UI P1 (L-24): an index this small is broken — say so
+        // instead of showing a confident "索引就绪".
+        if (VolumeIndex::Instance().IsValid() &&
+            VolumeIndex::Instance().EntryCount() < 10000) {
+            composed += FormatW(L"⚠ 索引条目异常少（%zu 项），搜索结果可能不完整，建议重建索引。\n",
+                                VolumeIndex::Instance().EntryCount());
+        }
+    }
+
+    if (!composed.empty()) {
+        SetWindowTextW(h_.info, (composed + tabInfoText_).c_str());
+    }
     UpdateStatusBar();
+    UpdateExecButton();
 }
 
 void MainWindow::SetTaskBusy(TaskMode mode) {
     taskMode_ = mode;
     bool busy = mode != TaskMode::None;
-    bool scanning = mode == TaskMode::Scanning;
+    bool scanning = mode == TaskMode::Scanning || mode == TaskMode::Indexing;
 
     // Everything that could race the worker on the results vector goes off;
     // the scan button doubles as Cancel while scanning (REVIEW P1-5 /
     // 07-X8: CancelScan existed with no caller).
+    // REVIEW-UI P1 (L-5): Indexing keeps the TAB control enabled —
+    // switching tabs is browsing, not acting.
+    // REVIEW-UI P1 (04-2): editSearch/chkMatchPath join the matrix.
     for (HWND h : { h_.exec, h_.undo, h_.emptyQ, h_.open,
-                    h_.btnSortSize, h_.btnSortTime, h_.tab, h_.list, h_.tree,
-                    h_.targetBtn, h_.advancedChk }) {
+                    h_.btnSortSize, h_.btnSortTime, h_.list, h_.tree,
+                    h_.targetBtn, h_.advancedChk,
+                    h_.editSearch, h_.chkMatchPath }) {
         if (h) EnableWindow(h, scanning ? FALSE : (busy ? FALSE : TRUE));
     }
+    EnableWindow(h_.tab, mode == TaskMode::Indexing ? TRUE : (busy ? FALSE : TRUE));
     EnableWindow(h_.scan, scanning ? TRUE : (busy ? FALSE : TRUE));
-    SetWindowTextW(h_.scan, scanning ? L"取消" : L"扫描");
+    // REVIEW-UI P1 (L-25): on the search tab the button means "rebuild
+    // index", not "scan".
+    bool searchTab = (CurrentTab() == TabId::Search);
+    SetWindowTextW(h_.scan, scanning ? L"取消"
+                                     : (searchTab ? L"重建索引" : L"扫描"));
 
     if (mode == TaskMode::None) {
         SendMessageW(h_.progress, PBM_SETMARQUEE, FALSE, 0);
@@ -664,6 +709,29 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
         SendMessageW(h_.progress, PBM_SETPOS, 0, 0);
         ShowWindow(h_.progress, SW_SHOW);
     }
+}
+
+// REVIEW-UI P1 (04-1/U-1): apply the pending search on the worker. An
+// in-flight search is cancelled and retried via a short timer; other busy
+// tasks simply defer the retry.
+void MainWindow::RunSearch() {
+    auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter());
+    if (!sp) return;
+    auto& svc = SessionService::Instance();
+    wchar_t buf[512] = {};
+    GetWindowTextW(h_.editSearch, buf, 512);
+    sp->SetQuery(buf, Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+
+    if (svc.IsSearching()) {
+        svc.CancelScan();   // abort the in-flight search at its checkpoint
+    }
+    if (!svc.SearchAsync(sp->Query(), sp->MatchPath())) {
+        // Still busy (draining the cancelled search or another task) —
+        // retry shortly; the UI stays responsive meanwhile.
+        SetTimer(hwnd_, TIMER_SEARCH_RETRY, 80, nullptr);
+        return;
+    }
+    UpdateSearchStatus();
 }
 
 void MainWindow::UpdateExecButton() {
@@ -786,8 +854,17 @@ void MainWindow::OnExecute() {
     };
     if (gSafe.count) groups += line(L"🛡 安全", gSafe.count, gSafe.bytes,
                                     L"缓存类，移入隔离区可随时还原");
-    if (gCautious.count) groups += line(L"ℹ 谨慎", gCautious.count, gCautious.bytes,
-                                        L"清理后系统/程序需重新下载或重建");
+    // REVIEW-UI P1 (L-7): search results are arbitrary files — the
+    // "cautious cache" wording was nonsense for a personal document.
+    if (gCautious.count) {
+        if (t == TabId::Search) {
+            groups += line(L"ℹ 普通文件/文件夹", gCautious.count, gCautious.bytes,
+                           L"将整体移入隔离区（原路径消失，相关快捷方式可能失效），可随时还原");
+        } else {
+            groups += line(L"ℹ 谨慎", gCautious.count, gCautious.bytes,
+                           L"清理后系统/程序需重新下载或重建");
+        }
+    }
     if (gDelegate.count) groups += line(L"⚠ 系统组件", gDelegate.count, gDelegate.bytes,
                                         L"通过系统命令处理，不可自动撤销");
     if (hasRecycleBin) groups += L"⚠ 清空回收站 — 不可逆\n";
@@ -1008,9 +1085,15 @@ void MainWindow::OnSelectAll() {
         if (ListView_GetCheckState(h_.list, i)) ++checked;
     }
     bool target = (checked < n);   // if not everything is checked → select all
+    // REVIEW-UI P1 (L-6/04-7): suppress the per-row event storm, then
+    // recount once.
+    auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
+    if (lp) lp->SetBatchUpdate(true);
     for (int i = 0; i < n; ++i) {
         ListView_SetCheckState(h_.list, i, target ? TRUE : FALSE);
     }
+    if (lp) lp->SetBatchUpdate(false);
+    UpdateExecButton();
 }
 
 // REVIEW P2 (08-F7): dry-run preview — batch GuardRails::Validate over the

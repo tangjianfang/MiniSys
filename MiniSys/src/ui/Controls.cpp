@@ -52,7 +52,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.targetBtn = CreateWindowExW(0, L"BUTTON", L"选择迁移目标盘…",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_CHOOSE_TARGET), inst, nullptr);
-    h.advancedChk = CreateWindowExW(0, L"BUTTON", L"高级模式: 使用 Symlink (默认 Junction)",
+    h.advancedChk = CreateWindowExW(0, L"BUTTON", L"高级模式(Symlink)",
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_ADVANCED), inst, nullptr);
     h.info = CreateWindowExW(0, L"STATIC", L"",

@@ -69,19 +69,28 @@ public:
     const std::vector<ScanItem>& Snapshot() const { return snapshot_; }
     const ScanItem* ItemAtRow(int row) const;
 
+    // REVIEW-UI P0/P1 (L-6/04-7): while true, the main window skips the
+    // per-change UpdateExecButton work during batch renders.
+    bool InBatchUpdate() const { return batchUpdate_; }
+    void SetBatchUpdate(bool on) { batchUpdate_ = on; }
+
 protected:
     UiHandles ui_;
     int  sortCol_ = -1;    // -1 none, 0 size, 1 time
     bool sortAsc_ = false; // false = descending
     std::vector<ScanItem> snapshot_;   // UI-private copy (REVIEW P1-1)
+    // REVIEW-UI P0 (L-1): full per-path check state (true AND false) —
+    // survives sorts, tab switches and data refreshes.
+    std::map<std::wstring, bool> checkStateByPath_;
+    bool batchUpdate_ = false;
+
+    void CaptureCheckState();          // call before permuting/replacing snapshot_
+    void RenderItems();
 
 private:
     void ApplySortAndRefresh();
     void ShowItemInfo(const ScanItem& it);   // REVIEW P1-6
-    static std::wstring RiskBadge(const ScanItem& it);
-
-protected:
-    void RenderItems();   // protected: SearchPresenter re-renders on query
+    std::wstring RiskBadge(const ScanItem& it);   // tab-aware (v2.4)
 };
 
 class JunkPresenter : public ListTabPresenter {
@@ -113,8 +122,11 @@ public:
     void Refresh() override;
 
     // Called by the main window (debounced edit change / checkbox toggle).
+    // REVIEW-UI P1: records the request only — SearchAsync (worker) runs it.
     void SetQuery(const std::wstring& text, bool matchPath);
 
+    const std::wstring& Query() const { return query_; }
+    bool MatchPath() const { return matchPath_; }
     size_t TotalIndexed() const;
 
 private:

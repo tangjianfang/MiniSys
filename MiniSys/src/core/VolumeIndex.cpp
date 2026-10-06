@@ -87,7 +87,8 @@ std::wstring VolumeIndex::NodeName(const Node& n, const std::wstring& names) {
 }
 
 void VolumeIndex::ResetForTesting() {
-    valid_ = false;
+    valid_.store(false, std::memory_order_release);
+    entryCount_.store(0, std::memory_order_release);
     ready_ = false;
     drive_ = 0;
     volumeSerial_ = 0;
@@ -117,7 +118,7 @@ void VolumeIndex::AddNodeForTesting(uint64_t frn, uint64_t parentFrn,
 
 void VolumeIndex::FinalizeForTesting(wchar_t drive) {
     drive_ = drive;
-    valid_ = false;   // not volume-backed, but queries work (ready_ set below)
+    valid_.store(false, std::memory_order_release);   // not volume-backed, queries work
     Finalize();
 }
 
@@ -197,11 +198,11 @@ bool VolumeIndex::EnsureBuilt(wchar_t drive,
                 // Same volume — try an incremental refresh (M3) before
                 // considering a rebuild.
                 if (RefreshFromUsn(cancel)) return true;
-                valid_ = false;
+                valid_.store(false, std::memory_order_release);
                 return BuildFull(drive, progress, cancel);
             }
         }
-        valid_ = false;
+        valid_.store(false, std::memory_order_release);
     }
     return BuildFull(drive, progress, cancel);
 }
@@ -311,7 +312,8 @@ bool VolumeIndex::BuildFull(wchar_t drive,
 
     if (ok && !nodes_.empty()) {
         Finalize();
-        valid_ = true;
+        entryCount_.store(nodes_.size(), std::memory_order_release);
+        valid_.store(true, std::memory_order_release);
         MS_LOG_INFO(L"VolumeIndex: %c: indexed %zu entries (serial %llx, journal %llx)",
                     drive_, nodes_.size(), volumeSerial_, journalId_);
     } else {
@@ -449,6 +451,7 @@ bool VolumeIndex::ApplyChanges(const std::vector<Change>& changes) {
         }
     }
     Finalize();
+    entryCount_.store(nodes_.size(), std::memory_order_release);
     return true;
 }
 

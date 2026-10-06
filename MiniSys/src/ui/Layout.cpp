@@ -43,7 +43,12 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     SetWindowPos(ui.emptyQ,      nullptr, pad + 3*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
     SetWindowPos(ui.open,        nullptr, pad + 3*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
     SetWindowPos(ui.targetBtn,   nullptr, pad + 4*(btnW + pad)+40, btnY, btnW + 40, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.advancedChk, nullptr, pad + 5*(btnW + pad)+80, btnY, 360, btnH, SWP_NOZORDER);
+    // REVIEW-UI P1 (L-4/X-16): right-anchored — the fixed x=828+w=360
+    // overflowed the default 1100px window's client area.
+    {
+        int advW = Scale(240, dpi);
+        SetWindowPos(ui.advancedChk, nullptr, W - pad - advW, btnY, advW, btnH, SWP_NOZORDER);
+    }
     SetWindowPos(ui.btnSortSize, nullptr, pad + 4*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
     SetWindowPos(ui.btnSortTime, nullptr, pad + 5*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
 
@@ -86,10 +91,10 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     }
 
     int infoY = btnY + btnH + pad + settingsRowH;
-    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, Scale(36, dpi), SWP_NOZORDER);
+    SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, Scale(52, dpi), SWP_NOZORDER);
 
     int contentY = infoY + Scale(40, dpi);
-    int contentH = H - contentY - pad;
+    int contentH = H - contentY - statusH - pad;   // REVIEW-UI P1 (L-4b/X-16)
     SetWindowPos(ui.list, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
     SetWindowPos(ui.tree, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
 

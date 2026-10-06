@@ -30,10 +30,11 @@ public:
     // nullptr (tests) disables posting.
     void SetWindow(HWND hwnd) { hwnd_ = hwnd; }
 
-    enum class TaskKind { None = 0, Scanning = 1, Executing = 2 };
+    enum class TaskKind { None = 0, Scanning = 1, Executing = 2, Searching = 3 };
 
     bool IsBusy() const { return taskKind_.load() != 0; }
     bool IsScanning() const { return taskKind_.load() == static_cast<int>(TaskKind::Scanning); }
+    bool IsSearching() const { return taskKind_.load() == static_cast<int>(TaskKind::Searching); }
     void CancelScan() { cancelScan_.store(true); }
 
     // ---- scanning --------------------------------------------------------
@@ -43,6 +44,12 @@ public:
     // v2.3: build/refresh the shared volume index on the worker thread
     // (powers the instant-search tab). Posts WM_APP_SCAN_* like a scan.
     bool BuildIndexAsync();
+
+    // REVIEW-UI P1 (04-1/U-1): instant search runs ON THE WORKER — the
+    // UI thread never touches the index containers. Cancels/queues behind
+    // an in-flight search via CancelScan(); completion posts
+    // WM_APP_SEARCH_DONE, results land in Results(TabId::Search).
+    bool SearchAsync(const std::wstring& query, bool matchPath);
 
     // ---- execution -------------------------------------------------------
     struct ExecuteReport {
@@ -73,8 +80,9 @@ public:
     // REVIEW P1-1 (04-R1): returns a COPY under a lock — the UI used to hold
     // a live reference to the worker-owned vector across message loops.
     std::vector<ScanItem> Results(TabId tab) const;
-    // UI-idle-only live access (render/sort while no task is running).
-    std::vector<ScanItem>& MutableResults(TabId tab);
+    // REVIEW-UI P1 (04-2): worker-side locked store (replaces the unlocked
+    // MutableResults escape hatch that raced RunPlan).
+    void StoreResults(TabId tab, std::vector<ScanItem> items);
 
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
@@ -105,6 +113,7 @@ private:
 
     void SetProgress(const std::wstring& text);
     void Post(HWND hwnd, UINT msg, WPARAM wp = 0);
+    static std::wstring FormatCountSimple(size_t n);   // "1,234,567"
 
     HWND hwnd_ = nullptr;
     std::thread worker_;

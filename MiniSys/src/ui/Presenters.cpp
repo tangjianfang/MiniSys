@@ -22,6 +22,14 @@
 
 namespace minisys {
 
+namespace {
+// REVIEW-UI P0/P1: shared helpers defined below (after the presenter code
+// that first uses them).
+void SetListColumns(HWND list,
+                    const std::vector<std::pair<const wchar_t*, int>>& cols);
+std::wstring LocalizeCategory(const std::wstring& c);
+} // namespace
+
 // =====================================================================
 // ListTabPresenter
 // =====================================================================
@@ -37,9 +45,26 @@ void ListTabPresenter::OnActivate() {
 
 void ListTabPresenter::Refresh() {
     // REVIEW P1-1: pull a UI-private copy; render/sort/collect/plans all
-    // work on it from here on.
+    // work on it from here on. REVIEW-UI P0 (L-1): capture the user's FULL
+    // check state BEFORE the snapshot is replaced — explicit unchecking of
+    // a recommended item must survive re-renders too.
+    CaptureCheckState();
     snapshot_ = SessionService::Instance().Results(tab_);
     RenderItems();
+}
+
+// Map row → path → checked, while the ListView rows and snapshot_ are still
+// consistent (call before sorting or replacing the snapshot).
+void ListTabPresenter::CaptureCheckState() {
+    int n = ListView_GetItemCount(ui_.list);
+    for (int r = 0; r < n; ++r) {
+        LVITEMW lvi{}; lvi.iItem = r; lvi.mask = LVIF_PARAM;
+        if (!ListView_GetItem(ui_.list, &lvi)) continue;
+        size_t idx = static_cast<size_t>(lvi.lParam);
+        if (idx >= snapshot_.size()) continue;
+        checkStateByPath_[ToLower(snapshot_[idx].path.wstring())] =
+            ListView_GetCheckState(ui_.list, r) != 0;
+    }
 }
 
 const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
@@ -51,27 +76,24 @@ const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
 }
 
 void ListTabPresenter::RenderItems() {
-    // REVIEW P0-6 / 07-X6: user checks used to be silently wiped on every
-    // re-render (sort, tab switch) — snapshot by path and restore.
-    std::set<std::wstring> wasChecked;
-    int prevCount = ListView_GetItemCount(ui_.list);
-    for (int row = 0; row < prevCount && row < static_cast<int>(snapshot_.size()); ++row) {
-        if (!ListView_GetCheckState(ui_.list, row)) continue;
-        LVITEMW lvi{}; lvi.iItem = row; lvi.mask = LVIF_PARAM;
-        ListView_GetItem(ui_.list, &lvi);
-        size_t idx = static_cast<size_t>(lvi.lParam);
-        if (idx < snapshot_.size()) {
-            wasChecked.insert(ToLower(snapshot_[idx].path.wstring()));
-        }
-    }
+    // REVIEW-UI P0 (L-2): scan tabs get their column headers restored
+    // (HistoryPresenter sets its own layout).
+    SetListColumns(ui_.list, {
+        { L"分类", 180 }, { L"风险", 84 }, { L"项目", 330 },
+        { L"大小", 100 }, { L"详情", 320 },
+    });
 
+    // REVIEW-UI P0 (L-6/04-7): batch renders must not storm
+    // LVN_ITEMCHANGED → UpdateExecButton.
+    batchUpdate_ = true;
     ListView_DeleteAllItems(ui_.list);
     auto& items = snapshot_;
     for (size_t i = 0; i < items.size(); ++i) {
         const auto& it = items[i];
         LVITEMW lvi{}; lvi.mask = LVIF_TEXT | LVIF_PARAM;
         lvi.iItem = static_cast<int>(i);
-        lvi.pszText = const_cast<LPWSTR>(it.category.c_str());
+        std::wstring cat = LocalizeCategory(it.category);
+        lvi.pszText = cat.data();
         lvi.lParam  = static_cast<LPARAM>(i);
         int row = ListView_InsertItem(ui_.list, &lvi);
         std::wstring badge = RiskBadge(it);
@@ -80,19 +102,67 @@ void ListTabPresenter::RenderItems() {
         std::wstring sz = it.sizeBytes ? FormatSize(it.sizeBytes) : std::wstring(L"—");
         ListView_SetItemText(ui_.list, row, 3, sz.data());
         ListView_SetItemText(ui_.list, row, 4, const_cast<LPWSTR>(it.detail.c_str()));
-        bool check = it.recommended;
-        if (!wasChecked.empty() &&
-            wasChecked.count(ToLower(it.path.wstring()))) {
-            check = true;   // restore the user's explicit choice
-        }
-        if (check) ListView_SetCheckState(ui_.list, row, TRUE);
+        // REVIEW-UI P0 (L-1): full per-path check state — an explicit
+        // UNCHECK of a recommended item is preserved as false.
+        auto known = checkStateByPath_.find(ToLower(it.path.wstring()));
+        bool check = (known != checkStateByPath_.end()) ? known->second
+                                                        : it.recommended;
+        ListView_SetCheckState(ui_.list, row, check ? TRUE : FALSE);
+    }
+    batchUpdate_ = false;
+}
+
+namespace {
+
+// REVIEW-UI P0 (L-2): shared column header/width switcher (free function —
+// used by both the scan-tab presenters and HistoryPresenter).
+void SetListColumns(HWND list,
+                    const std::vector<std::pair<const wchar_t*, int>>& cols) {
+    for (size_t i = 0; i < cols.size(); ++i) {
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH;
+        col.pszText = const_cast<LPWSTR>(cols[i].first);
+        col.cx = cols[i].second;
+        SendMessageW(list, LVM_SETCOLUMNW, static_cast<WPARAM>(i),
+                     reinterpret_cast<LPARAM>(&col));
     }
 }
+
+// REVIEW-UI P1 (L-8): display-layer localization for the English category
+// tokens stored in the rule table / scanners (storage unchanged).
+std::wstring LocalizeCategory(const std::wstring& c) {
+    static const std::map<std::wstring, std::wstring> kMap = {
+        { L"System Temp", L"系统临时" },   { L"Explorer", L"资源管理器" },
+        { L"Browser Cache", L"浏览器缓存" }, { L"Dev Cache", L"开发缓存" },
+        { L"Windows Update", L"Windows 更新" }, { L"Windows Logs", L"系统日志" },
+        { L"Chat Files", L"聊天文件" },   { L"System Component", L"系统组件" },
+        { L"System Reserved", L"系统保留" }, { L"Recycle Bin", L"回收站" },
+        { L"App", L"应用程序" },          { L"Image", L"图片" },
+        { L"Video", L"视频" },            { L"Audio", L"音频" },
+        { L"Archive", L"压缩包" },        { L"Installer", L"安装包" },
+        { L"Document", L"文档" },         { L"VirtualDisk", L"虚拟磁盘" },
+        { L"Other", L"其他" },
+    };
+    // "Duplicate (Video)" → "重复文件 · 视频"
+    if (c.rfind(L"Duplicate (", 0) == 0 && c.size() > 13 && c.back() == L')') {
+        auto inner = c.substr(11, c.size() - 12);
+        return L"重复文件 · " + LocalizeCategory(inner);
+    }
+    auto it = kMap.find(c);
+    return it != kMap.end() ? it->second : c;
+}
+
+} // namespace
 
 // v2.2 (REVIEW P0-6): risk badge text for column 1. Rule-less items
 // (large files / apps / folder tree) are honestly marked unclassified
 // instead of guessed at.
 std::wstring ListTabPresenter::RiskBadge(const ScanItem& it) {
+    // REVIEW-UI P1 (L-7): search results are unclassified by design — say so
+    // instead of the meaningless "—".
+    if (tab_ == TabId::Search) {
+        return it.path == L"$RECYCLE.BIN" ? L"⚠ 不可逆" : L"ℹ 未评估";
+    }
     if (it.ruleId.empty() && it.path != L"$RECYCLE.BIN") return L"—";
     if (it.path == L"$RECYCLE.BIN") return L"⚠ 不可逆";
     switch (it.riskLevel) {
@@ -139,6 +209,9 @@ void ListTabPresenter::OnColumnClick(int col) {
 }
 
 void ListTabPresenter::ApplySortAndRefresh() {
+    // REVIEW-UI P0 (L-1): capture check state BEFORE the permutation — the
+    // rows' lParams are only consistent with the pre-sort snapshot order.
+    CaptureCheckState();
     auto& items = snapshot_;   // UI-private (REVIEW P1-1)
     if (items.empty()) return;
 
@@ -247,64 +320,17 @@ size_t SearchPresenter::TotalIndexed() const {
     return vi.IsValid() ? vi.EntryCount() : 0;
 }
 
+// REVIEW-UI P1 (04-1/U-1): the whole search pipeline now runs on the
+// SessionService worker — SetQuery only records the request; the main
+// window drives SearchAsync and WM_APP_SEARCH_DONE pulls the results.
 void SearchPresenter::SetQuery(const std::wstring& text, bool matchPath) {
     query_ = text;
     matchPath_ = matchPath;
-    Refresh();
 }
 
 void SearchPresenter::Refresh() {
-    auto& vi = VolumeIndex::Instance();
-    if (!vi.IsValid()) {
-        snapshot_.clear();
-        SessionService::Instance().MutableResults(tab_) = snapshot_;
-        RenderItems();
-        return;
-    }
-    if (query_.empty()) {
-        snapshot_.clear();
-        SessionService::Instance().MutableResults(tab_) = snapshot_;
-        RenderItems();
-        return;
-    }
-
-    constexpr size_t kMaxResults = 1000;
-    constexpr size_t kSizeFetchRows = 150;   // lazy size pass (top rows)
-    std::vector<ScanItem> items;
-    items.reserve(256);
-    vi.Search(query_, matchPath_, kMaxResults,
-        [&](const VolumeIndex::SearchHit& hit) {
-            ScanItem it;
-            std::filesystem::path p(hit.path);
-            it.category    = hit.isDirectory ? L"文件夹" : L"文件";
-            it.title       = hit.name;
-            it.path        = p;
-            it.sizeBytes   = 0;                      // filled below (top rows)
-            it.lastWriteFiletime = hit.lastWrite;
-            it.createTime  = hit.lastWrite;
-            it.detail      = p.parent_path().wstring();
-            it.recommended = false;
-            it.riskLevel   = RiskLevel::Cautious;    // unclassified — badge "—"
-            items.push_back(std::move(it));
-            return true;
-        });
-
-    // Lazy size fetch for the first rows so 大小 sort/column works without
-    // walking every hit (ADR-004: the index itself carries no sizes).
-    WIN32_FILE_ATTRIBUTE_DATA fad{};
-    for (size_t i = 0; i < items.size() && i < kSizeFetchRows; ++i) {
-        if (GetFileAttributesExW(LongPath(items[i].path).c_str(),
-                                 GetFileExInfoStandard, &fad)) {
-            items[i].sizeBytes =
-                (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
-                static_cast<unsigned long long>(fad.nFileSizeLow);
-        }
-    }
-
-    // Keep the service-side storage in sync so the plan-staleness check in
-    // ExecutePlan sees exactly what the user confirmed.
-    SessionService::Instance().MutableResults(tab_) = items;
-    snapshot_ = std::move(items);
+    // Results were stored by the worker under the service lock; pull a copy.
+    snapshot_ = SessionService::Instance().Results(tab_);
     RenderItems();
 }
 
@@ -436,7 +462,11 @@ void ListTabPresenter::ShowItemInfo(const ScanItem& it) {
     tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
     tc.pszWindowTitle = L"项目说明";
     tc.pszMainIcon = TD_INFORMATION_ICON;
-    tc.pszMainInstruction = it.title.c_str();
+    // REVIEW-UI P1 (04-3): `it` references the presenter snapshot; a queued
+    // search timer firing inside the TaskDialog modal pump could replace it.
+    // Copy the strings the dialog will keep redrawing.
+    std::wstring titleCopy = it.title;
+    tc.pszMainInstruction = titleCopy.c_str();
     std::wstring content = L"【这是什么】\n" + what +
                            L"\n\n【处理后会怎样】\n" + consequence +
                            L"\n\n【能否还原】\n" + undoLine;
@@ -468,7 +498,9 @@ bool FolderTreePresenter::OnContextMenu() {
     TreeView_SelectItem(ui_.tree, hItem);
 
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_DELETE, L"删除文件夹…");
+    // REVIEW-UI P1 (L-8): the action is quarantine, not deletion — the verb
+    // must match the confirmation dialog.
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_DELETE, L"移入隔离区…");
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                              pt.x, pt.y, 0, ui_.main, nullptr);
     DestroyMenu(hMenu);
@@ -517,6 +549,13 @@ HistoryPresenter::HistoryPresenter(UiHandles ui, SessionService& svc)
     : TabPresenter(TabId::History), ui_(ui), svc_(svc) {}
 
 void HistoryPresenter::Refresh() {
+    // REVIEW-UI P0 (L-2): this tab's data layout (类型/时间/大小/详情/状态)
+    // differs from the scan tabs' shared headers — switch them per-tab
+    // instead of jamming timestamps into the 84px "风险" column.
+    SetListColumns(ui_.list, {
+        { L"类型", 170 }, { L"时间", 150 }, { L"大小", 90 },
+        { L"详情（来源 → 去向）", 420 }, { L"状态", 110 },
+    });
     ListView_DeleteAllItems(ui_.list);
     auto recs = OperationLog::Instance().LoadAll();
     for (size_t i = 0; i < recs.size(); ++i) {
