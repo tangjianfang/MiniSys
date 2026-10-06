@@ -620,6 +620,14 @@ bool VolumeIndex::WalkBuild(wchar_t drive,
     for (auto& t : pool) t.join();
 
     walkBuilt_ = !nodes_.empty() && !cancelled;
+    if (cancelled) {
+        // v2.13b review fix: a cancelled re-walk has already cleared
+        // nodes_ — leaving valid_ == true would serve an EMPTY index to
+        // every search with no self-heal. Fail loudly instead; the next
+        // search-tab entry rebuilds (from the disk cache if present).
+        valid_.store(false, std::memory_order_release);
+        entryCount_.store(0, std::memory_order_release);
+    }
     MS_LOG_INFO(L"VolumeIndex: %c: walk %s: %zu entries, %zu dirs",
                 drive, cancelled ? L"CANCELLED" : L"done", nodes_.size(),
                 visited.load());

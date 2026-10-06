@@ -417,8 +417,14 @@ bool SessionService::IdleMaintenanceAsync() {
             if (vi.IsWalkBuilt()) {
                 SetProgress(FormatW(L"空闲维护：重扫 %c: 索引…", d));
                 Post(hwnd, WM_APP_SCAN_PROGRESS);
+                // v2.13b review fix: progress text needs the matching Post,
+                // or the status bar never repaints during the multi-minute
+                // re-walk.
                 vi.RefreshWalk(
-                    [this](const std::wstring& msg) { SetProgress(msg); },
+                    [this, hwnd](const std::wstring& msg) {
+                        SetProgress(msg);
+                        Post(hwnd, WM_APP_SCAN_PROGRESS);
+                    },
                     cancelScan_);
             } else {
                 vi.EnsureBuilt(d, nullptr, cancelScan_);

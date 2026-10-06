@@ -28,3 +28,5 @@ ipch/
 .tmp-review2bench*
 .tmp-review2/
 MiniSys/src/res/version.h
+minisys-shot.png
+minisys-2*.png

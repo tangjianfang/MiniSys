@@ -45,6 +45,22 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* st = reinterpret_cast<State*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     switch (msg) {
         case WM_COMMAND:
+            // v2.13b review fix: the OK/Cancel BUTTONS were dead — clicks
+            // posted WM_COMMAND IDOK/IDCANCEL that nobody handled; only
+            // Enter/Esc worked. (Note the EDIT's control id is also 1/IDOK
+            // — disambiguate via the notification code.)
+            if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == IDOK) {
+                int sel = static_cast<int>(SendMessageW(st->list, LB_GETCURSEL, 0, 0));
+                if (sel >= 0 && sel < static_cast<int>(st->visible.size())) {
+                    st->runIdx = sel;
+                }
+                st->done = true;
+                return 0;
+            }
+            if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == IDCANCEL) {
+                st->done = true;
+                return 0;
+            }
             if (HIWORD(wp) == EN_CHANGE && LOWORD(wp) == 1) {
                 Refill(*st);
                 return 0;
