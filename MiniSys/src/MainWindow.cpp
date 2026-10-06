@@ -149,6 +149,14 @@ int MainWindow::RunMessageLoop() {
             HWND next = GetNextDlgTabItem(hwnd_, focus, (GetKeyState(VK_SHIFT) & 0x8000) ? TRUE : FALSE);
             if (next) { SetFocus(next); continue; }
         }
+        // v2.9: Enter in the search box re-runs the query (the cached rows
+        // from last session display without running anything; this is the
+        // explicit "refresh").
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN &&
+            GetFocus() == h_.editSearch && taskMode_ == TaskMode::None) {
+            RunSearch();
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -285,6 +293,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == IDC_CHK_MATCHPATH) {
                 // REVIEW-UI P1 (04-2): gated like the debounce timer.
                 if (taskMode_ == TaskMode::None) RunSearch();
+                SaveSettings();   // v2.9: persist the toggle
                 return 0;
             }
             switch (LOWORD(wp)) {
@@ -429,6 +438,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CLOSE:
+            SaveSettings();   // v2.9: keep query/tab/filters for next session
             DestroyWindow(hwnd_);
             return 0;
         case WM_DESTROY:
@@ -468,11 +478,15 @@ void MainWindow::OnCreate() {
     SetStockButtonIcon(h_.targetBtn, SIID_DRIVEFIXED);   // 迁移目标 = 硬盘
     SetStockButtonIcon(h_.about,     SIID_HELP);         // 关于 = 问号
 
-    OnTabChanged();
+    // v2.9: restore persisted state FIRST (it re-selects the last active
+    // tab and refills the search box), so the initial tab change renders
+    // the right page.
     LoadSettings();   // REVIEW P2: restore persisted state + exclusions
+    OnTabChanged();
     // v2.5 cached results: restore the last session's scan lists so tabs
     // open populated; each tab's staleness is judged separately and shown
-    // ("上次扫描: …（缓存）"). Execution re-verifies every item regardless.
+    // ("上次扫描: …（缓存）"). v2.9: the search tab joins (query + results).
+    // Execution re-verifies every item regardless.
     for (int i = 0; i < static_cast<int>(TabId::Count); ++i) {
         svc.TryLoadCachedResults(static_cast<TabId>(i));
     }
@@ -717,9 +731,9 @@ void MainWindow::OnTabChanged() {
             break;
         case TabId::Search:
             tabInfoText_ =
-                L"输入即搜（多词为“并且”，支持 * ? 通配符）；双击定位文件，勾选后可移入隔离区。\n"
+                L"输入即搜（多词为“并且”，支持 * ? 通配符，Enter 立即刷新）；双击定位文件，勾选后可移入隔离区。\n"
                 L"· 点“快速筛选”一键过滤：.pdb / .obj / Debug 文件夹等；手动过滤词：folder: / file: / ext:cpp;h。\n"
-                L"ℹ 基于全盘文件索引（与垃圾扫描共用）；未就绪时自动构建，USN 异常时自动回退遍历（较慢）。";
+                L"ℹ 上次的搜索词与结果会原样恢复（无需重输）；索引未就绪时自动构建，USN 异常时回退遍历。";
             break;
         case TabId::LargeFiles:
             tabInfoText_ =
@@ -755,17 +769,16 @@ void MainWindow::OnTabChanged() {
                 SetTaskBusy(TaskMode::Indexing);
             }
         } else {
-            // v2.6: opening the tab must NOT fire a search on its own —
-            // only re-apply when the user already typed something.
-            wchar_t buf[512] = {};
-            GetWindowTextW(h_.editSearch, buf, 512);
-            if (buf[0]) RunSearch();
-            else UpdateSearchStatus();
+            // v2.9: opening the tab NEVER re-runs the search — the cached
+            // rows from the last query display as-is (restore-on-open);
+            // Enter in the box or editing the query refreshes explicitly.
+            UpdateSearchStatus();
         }
     }
     if (auto* p = ActivePresenter()) p->Refresh();
     UpdateStatusBar();
     UpdateExecButton();
+    SaveSettings();   // v2.9: remember the active tab
     // Re-layout for the new tab (settings row shown/hidden dynamically).
     OnSize();
 }
@@ -1312,7 +1325,7 @@ void MainWindow::OnAbout() {
     tc.pszWindowTitle = L"关于 MiniSys";
     tc.pszMainIcon = MAKEINTRESOURCEW(IDI_APPICON);
     // REVIEW-UI P2 (L-18): version + the search tab finally documented.
-    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.8";
+    tc.pszMainInstruction = L"MiniSys — C 盘瘦身助手  v2.9";
     tc.pszContent =
         L"安全、可逆的 C 盘清理与迁移工具。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
@@ -1364,6 +1377,15 @@ void MainWindow::LoadSettings() {
     SetWindowTextW(h_.editFileType, settings_.largeFilesExtFilter.c_str());
     SetWindowTextW(h_.editDrives, settings_.largeFilesDrives.c_str());
     GuardRails::SetUserExclusions(settings_.exclusions);
+    // v2.9: session restore — search box, match-path toggle, active tab.
+    // The cached result list (incl. the last search) is loaded separately
+    // in OnCreate; together the app reopens exactly where it was left.
+    SetWindowTextW(h_.editSearch, settings_.lastSearchQuery.c_str());
+    Button_SetCheck(h_.chkMatchPath,
+                    settings_.searchMatchPath ? BST_CHECKED : BST_UNCHECKED);
+    int tab = settings_.lastTab;
+    if (tab < 0 || tab >= static_cast<int>(TabId::Count)) tab = 0;
+    TabCtrl_SetCurSel(h_.tab, tab);
 }
 
 void MainWindow::SaveSettings() {
@@ -1376,6 +1398,11 @@ void MainWindow::SaveSettings() {
     settings_.largeFilesExtFilter = buf;
     GetWindowTextW(h_.editDrives, buf, 128);
     settings_.largeFilesDrives = buf;
+    // v2.9: session-restore fields.
+    GetWindowTextW(h_.editSearch, buf, 512);
+    settings_.lastSearchQuery = buf;
+    settings_.searchMatchPath = (Button_GetCheck(h_.chkMatchPath) == BST_CHECKED);
+    settings_.lastTab = static_cast<int>(CurrentTab());
     settings_.Save();
     GuardRails::SetUserExclusions(settings_.exclusions);
 }

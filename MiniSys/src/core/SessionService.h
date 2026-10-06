@@ -94,6 +94,9 @@ public:
     // Load a persisted result list from %LOCALAPPDATA%\MiniSys\cache (UI
     // startup convenience). Returns false when no usable cache exists.
     bool TryLoadCachedResults(TabId tab);
+    // Stamp "this tab's data was produced at time T" (v2.9: the search tab
+    // stamps on each completed query, not just scanners).
+    void NoteScanTime(TabId tab);
 
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
@@ -141,7 +144,7 @@ private:
     void RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd);
     void RunPlan(const CleanPlan plan, HWND hwnd);
     void RunEmptyQuarantine(HWND hwnd);
-    void SaveResultsCache(TabId tab);   // v2.5 persisted scan results
+    void SaveResultsCache(TabId tab, bool allowEmpty = false);   // v2.5/v2.9
 
     void SetProgress(const std::wstring& text);
     void Post(HWND hwnd, UINT msg, WPARAM wp = 0, LPARAM lp = 0);

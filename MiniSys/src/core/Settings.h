@@ -14,6 +14,11 @@ struct Settings {
     std::wstring largeFilesExtFilter;   // ".mp4;.mkv"
     std::wstring largeFilesDrives;      // "C;D"
     std::vector<std::wstring> exclusions;   // user-protected paths
+    // v2.9 session-restore: the search box / match-path toggle / active tab
+    // come back exactly as left, so nothing has to be retyped or re-run.
+    std::wstring lastSearchQuery;       // "ext:pdb readme" …
+    bool searchMatchPath = false;
+    int lastTab = 0;                    // TabId value
 
     static Settings Load();                    // %LOCALAPPDATA%\MiniSys\settings.json
     void Save() const;                         // atomic (temp + rename)

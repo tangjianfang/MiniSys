@@ -151,8 +151,8 @@ bool JsonToScanItem(const Json& j, ScanItem& it) {
 
 } // namespace
 
-void SessionService::SaveResultsCache(TabId tab) {
-    if (tab == TabId::History || tab == TabId::Search) return;   // derived data
+void SessionService::SaveResultsCache(TabId tab, bool allowEmpty) {
+    if (tab == TabId::History) return;   // OperationLog is the store
     std::vector<ScanItem> items;
     uint64_t scanAt = 0;
     {
@@ -160,7 +160,9 @@ void SessionService::SaveResultsCache(TabId tab) {
         items  = results_[static_cast<size_t>(tab)];
         scanAt = scanAt_[static_cast<size_t>(tab)];
     }
-    if (items.empty() || scanAt == 0) return;
+    // v2.9: an explicit empty write invalidates a stale cache (cleared
+    // search); otherwise empty lists are simply not persisted.
+    if ((items.empty() && !allowEmpty) || (scanAt == 0 && !items.empty())) return;
     if (items.size() > kMaxCachedItems) items.resize(kMaxCachedItems);
 
     try {
@@ -187,6 +189,14 @@ void SessionService::SaveResultsCache(TabId tab) {
     }
 }
 
+void SessionService::NoteScanTime(TabId tab) {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    std::lock_guard<std::mutex> g(resultsMu_);
+    scanAt_[static_cast<size_t>(tab)] =
+        (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+}
+
 uint64_t SessionService::LastScanAt(TabId tab) const {
     std::lock_guard<std::mutex> g(resultsMu_);
     return scanAt_[static_cast<size_t>(tab)];
@@ -198,7 +208,7 @@ bool SessionService::ResultsFromCache(TabId tab) const {
 }
 
 bool SessionService::TryLoadCachedResults(TabId tab) {
-    if (tab == TabId::History || tab == TabId::Search) return false;
+    if (tab == TabId::History) return false;   // OperationLog is the store
     {
         std::lock_guard<std::mutex> g(resultsMu_);
         if (!results_[static_cast<size_t>(tab)].empty()) return false;  // fresh data wins
@@ -376,6 +386,21 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
         }
         size_t total = vi.IsValid() ? vi.EntryCount() : 0;
         StoreResults(TabId::Search, std::move(items));
+        // v2.9: persist the search results (throttled — a search runs per
+        // keystroke) so the next session reopens straight into them, query
+        // and all. Clearing the box invalidates the cache explicitly.
+        if (!cancelScan_.load()) {
+            NoteScanTime(TabId::Search);
+            static auto lastSave = std::chrono::steady_clock::now() -
+                                   std::chrono::hours(1);   // shared throttle
+            if (query.empty()) {
+                SaveResultsCache(TabId::Search, /*allowEmpty=*/true);
+            } else if (std::chrono::steady_clock::now() - lastSave >
+                       std::chrono::milliseconds(1500)) {
+                lastSave = std::chrono::steady_clock::now();
+                SaveResultsCache(TabId::Search);
+            }
+        }
         SetProgress(cancelScan_.load()
             ? L"搜索已取消（有新输入）"
             : FormatW(L"匹配 %s 项（索引共 %s 项）",

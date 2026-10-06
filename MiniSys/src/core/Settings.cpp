@@ -35,6 +35,10 @@ Settings Settings::Load() {
     s.largeFilesMinMB = static_cast<int>(j.Get(L"largeFilesMinMB").AsInt(100));
     s.largeFilesExtFilter = j.Get(L"largeFilesExtFilter").AsString();
     s.largeFilesDrives = j.Get(L"largeFilesDrives").AsString();
+    // v2.9 session-restore fields.
+    s.lastSearchQuery = j.Get(L"lastSearchQuery").AsString();
+    s.searchMatchPath = j.Get(L"searchMatchPath").AsBool(false);
+    s.lastTab = static_cast<int>(j.Get(L"lastTab").AsInt(0));
     const Json& ex = j.Get(L"exclusions");
     if (ex.IsArray()) {
         for (size_t i = 0; i < ex.Size(); ++i) {
@@ -52,6 +56,9 @@ void Settings::Save() const {
     j.Set(L"largeFilesMinMB", Json(static_cast<double>(largeFilesMinMB)));
     j.Set(L"largeFilesExtFilter", Json(largeFilesExtFilter));
     j.Set(L"largeFilesDrives", Json(largeFilesDrives));
+    j.Set(L"lastSearchQuery", Json(lastSearchQuery));
+    j.Set(L"searchMatchPath", Json(searchMatchPath));
+    j.Set(L"lastTab", Json(static_cast<double>(lastTab)));
     Json arr = Json::Array();
     for (const auto& e : exclusions) arr.Push(Json(e));
     j.Set(L"exclusions", arr);
