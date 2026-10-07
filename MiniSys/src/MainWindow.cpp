@@ -503,6 +503,12 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             } else if (wp == TIMER_VERIFY_LIST) {
                 KillTimer(hwnd_, TIMER_VERIFY_LIST);
                 OnVerifyList(/*manual=*/false);
+            } else if (wp == TIMER_TOUR && tourMode_) {
+                // v2.13c: next tab in the visual-review walk.
+                int cur = TabCtrl_GetCurSel(h_.tab);
+                int next = (cur + 1) % static_cast<int>(TabId::Count);
+                TabCtrl_SetCurSel(h_.tab, next);
+                OnTabChanged();
             } else if (wp == TIMER_IDLE_COUNTDOWN) {
                 // v2.10 (X-10): grace countdown for the idle rescan — any
                 // global input since arming cancels it.
@@ -589,6 +595,24 @@ void MainWindow::OnCreate() {
     if (auto* p = ActivePresenter()) p->Refresh();
     // v2.5: idle-time refresh cadence (see OnIdleCheck).
     SetTimer(hwnd_, TIMER_IDLE_REFRESH, 30 * 1000, nullptr);
+    // v2.13c: `-tour` — automated visual-review walk. The app cycles its
+    // own tabs every 4 s so a passive screenshot poller (tools/screenshot.ps1)
+    // captures every page without any input injection (which UIPI forbids
+    // against an elevated window anyway). Review mode only; close the
+    // window to stop.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            for (int i = 0; i < argc; ++i) {
+                if (_wcsicmp(argv[i], L"-tour") == 0) {
+                    tourMode_ = true;
+                    SetTimer(hwnd_, TIMER_TOUR, 4000, nullptr);
+                }
+            }
+            LocalFree(argv);
+        }
+    }
     UpdateStatusBar();
     UpdateExecButton();
 }
@@ -1133,6 +1157,8 @@ void MainWindow::OnTabChanged() {
     if (auto* p = ActivePresenter()) p->Refresh();
     UpdateStatusBar();
     UpdateExecButton();
+    SessionService::Instance().SetProgressText(L"就绪");   // V-R6: no cross-page residue
+    UpdateStatusBar();
     SaveSettings();   // v2.9: remember the active tab
     // Re-layout for the new tab (settings row shown/hidden dynamically).
     OnSize();

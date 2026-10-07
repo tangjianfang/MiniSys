@@ -122,6 +122,10 @@ public:
 
     // Latest progress text (thread-safe read).
     std::wstring ProgressText() const;
+    // v2.13c (V-R6): the UI resets the progress text on tab switches — a
+    // finished search's "匹配 0 项(索引共…)" used to linger in pane 2 on
+    // every other page.
+    void SetProgressText(const std::wstring& text) { SetProgress(text); }
 
     // ---- undo ------------------------------------------------------------
     enum class UndoResult { Ok, NotReversible, DeleteType, Failed };

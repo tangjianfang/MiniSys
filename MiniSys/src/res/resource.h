@@ -45,6 +45,7 @@
 #define TIMER_IDLE_REFRESH          4     // v2.5: idle-time background rescan
 #define TIMER_VERIFY_LIST           5     // v2.7: debounced focus-return verify
 #define TIMER_IDLE_COUNTDOWN        6     // v2.10: idle rescan grace countdown
+#define TIMER_TOUR                  7     // v2.13c: -tour visual-review walk
 #define IDC_ACCEL_PALETTE           2091  // v2.10: Ctrl+K command palette
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)

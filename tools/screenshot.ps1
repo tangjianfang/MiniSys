@@ -15,7 +15,8 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 public static class WinCap {
-    [DllImport("user32.dll")] public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowW(string cls, string title);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetWindowDC(IntPtr h);
@@ -28,18 +29,22 @@ Add-Type -AssemblyName System.Drawing
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 
 function Capture([string]$path) {
-    $h = [WinCap]::FindWindowW("MiniSysMainWnd", $null)
-    if ($h -eq [IntPtr]::Zero) { Write-Host "MiniSys 未运行(找不到 MiniSysMainWnd)"; return $false }
+    # 提权窗口按类名查找可能受完整性级别影响——优先用进程主窗口句柄。
+    $proc = Get-Process MiniSys -ErrorAction SilentlyContinue
+    $h = if ($proc -and $proc.MainWindowHandle -ne 0) { $proc.MainWindowHandle }
+         else { [WinCap]::FindWindowW("MiniSysMainWnd", $null) }
+    if (-not $h -or $h -eq [IntPtr]::Zero) { Write-Host "MiniSys 未运行(无主窗口)"; return $false }
     $r = New-Object WinCap+RECT
     [WinCap]::GetWindowRect($h, [ref]$r) | Out-Null
     $w = $r.R - $r.L; $ht = $r.B - $r.T
     if ($w -le 0 -or $ht -le 0) { Write-Host "窗口尺寸无效(最小化?)"; return $false }
     $bmp = New-Object System.Drawing.Bitmap($w, $ht)
+    # v2: PrintWindow 对提权窗口返回黑帧 —— 改为屏幕裁剪(CopyFromScreen
+    # 取的是 DWM 合成后的屏幕,不受完整性级别影响;要求窗口未被完全遮挡)。
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $hdc = $g.GetHdc()
-    # PW_RENDERFULLCONTENT (2) 捕获 DWM 合成内容,后台窗口也完整
-    [WinCap]::PrintWindow($h, $hdc, 2) | Out-Null
-    $g.ReleaseHdc($hdc); $g.Dispose()
+    try {
+        $g.CopyFromScreen($r.L, $r.T, 0, 0, (New-Object System.Drawing.Size($w, $ht)))
+    } finally { $g.Dispose() }
     $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
     Write-Host "已保存 $path ($w x $ht)"

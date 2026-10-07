@@ -205,16 +205,31 @@ namespace {
 // used by both the scan-tab presenters and HistoryPresenter). v2.5: widths
 // DPI-scaled (L-12); the format is reset so sort arrows from another tab's
 // header never survive the switch.
+// v2.13c visual-review fix: the 修改时间 column (v2.10) was never VISIBLE —
+// this function only SET existing columns, but the ListView is created with
+// five; a sixth must be INSERTED. Extra columns beyond the requested set
+// (layout shrinking) are deleted.
 void SetListColumns(HWND list,
                     const std::vector<std::pair<const wchar_t*, int>>& cols) {
+    HWND hdr = ListView_GetHeader(list);
+    int existing = hdr ? Header_GetItemCount(hdr) : 0;
     for (size_t i = 0; i < cols.size(); ++i) {
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         col.fmt = LVCFMT_LEFT;
         col.pszText = const_cast<LPWSTR>(cols[i].first);
         col.cx = UiScale(list, cols[i].second);
-        SendMessageW(list, LVM_SETCOLUMNW, static_cast<WPARAM>(i),
-                     reinterpret_cast<LPARAM>(&col));
+        if (static_cast<int>(i) < existing) {
+            SendMessageW(list, LVM_SETCOLUMNW, static_cast<WPARAM>(i),
+                         reinterpret_cast<LPARAM>(&col));
+        } else {
+            SendMessageW(list, LVM_INSERTCOLUMNW, static_cast<WPARAM>(i),
+                         reinterpret_cast<LPARAM>(&col));
+        }
+    }
+    while (existing > static_cast<int>(cols.size())) {
+        --existing;
+        ListView_DeleteColumn(list, existing);
     }
 }
 

@@ -74,6 +74,7 @@ private:
     bool scanIconIsStop_ = false;             // v2.5 (L-22): cancel-state icon
     int  idleCountdown_ = 0;                  // v2.10 (X-10): rescan grace
     DWORD idleArmInput_ = 0;                  // v2.10 (X-10): cancel on input
+    bool tourMode_ = false;                   // v2.13c: -tour visual-review walk
     void OnIdleCheck();                       // v2.5: idle background rescan
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab
     void OnQuickFilterMenu();                 // v2.6: search filter presets
