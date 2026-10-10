@@ -18,8 +18,11 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     // review-07 X-1: WS_TABSTOP on the list/tree (and the settings edits
     // below) — Tab used to cycle only the buttons, the 1000-row result
     // list was keyboard-unreachable.
+    // v2.15 (round-4 02 P0): VIRTUAL list — LVM_SETITEMCOUNT instead of
+    // per-row inserts (1000 rows: 1.26 s → ~70 ms; 100k rows same price).
     h.list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_OWNERDATA | LVS_REPORT |
+            LVS_SHOWSELALWAYS,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_LISTVIEW), inst, nullptr);
     // REVIEW-UI P2 (L-11): LABELTIP — truncated cells (the detail column's
     // long paths) get a full-text tooltip instead of a silent clip.

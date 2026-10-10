@@ -66,15 +66,9 @@ void ListTabPresenter::Refresh() {
 // Map row → path → checked, while the ListView rows and snapshot_ are still
 // consistent (call before sorting or replacing the snapshot).
 void ListTabPresenter::CaptureCheckState() {
-    int n = ListView_GetItemCount(ui_.list);
-    for (int r = 0; r < n; ++r) {
-        LVITEMW lvi{}; lvi.iItem = r; lvi.mask = LVIF_PARAM;
-        if (!ListView_GetItem(ui_.list, &lvi)) continue;
-        size_t idx = static_cast<size_t>(lvi.lParam);
-        if (idx >= snapshot_.size()) continue;
-        checkStateByPath_[ToLower(snapshot_[idx].path.wstring())] =
-            ListView_GetCheckState(ui_.list, r) != 0;
-    }
+    // v2.15: no-op — the virtual list holds no per-row check state;
+    // checkStateByPath_ is the single source of truth, updated directly by
+    // the LVN_ITEMCHANGED state-flip path in the main window.
 }
 
 // review-07 X-7: same window as CaptureCheckState — the rows still match the
@@ -138,65 +132,101 @@ const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
 }
 
 void ListTabPresenter::RenderItems() {
-    // review-07 X-7: user-adjusted column widths survive re-renders when the
-    // column layout is unchanged (a tab switch legitimately resets widths).
+    // v2.15 (round-4 02 P0): VIRTUAL rendering — no per-row inserts. The
+    // columns are still switched per tab; check state lives in
+    // checkStateByPath_ (seeded from `recommended` for unseen paths);
+    // text is supplied on demand via SupplyDispInfo.
+    const std::vector<std::pair<const wchar_t*, int>> kScanCols = {
+        { L"分类", 150 }, { L"风险", 100 }, { L"项目", 300 },
+        { L"大小", 90 }, { L"详情", 260 }, { L"修改时间", 110 },
+    };
     HWND hdr = ListView_GetHeader(ui_.list);
     int oldColCount = hdr ? Header_GetItemCount(hdr) : 0;
     std::vector<int> oldWidths;
     for (int i = 0; i < oldColCount; ++i) {
         oldWidths.push_back(ListView_GetColumnWidth(ui_.list, i));
     }
-
-    // REVIEW-UI P0 (L-2): scan tabs get their column headers restored
-    // (HistoryPresenter sets its own layout). v2.5: widths are DPI-scaled
-    // (L-12) and the risk column fits "⚠️ 系统组件" (L-14). review-07 X-9
-    // (v2.10): a real 修改时间 column — "按时间排序" no longer points at the
-    // 详情 column where the timestamp is invisible.
-    const std::vector<std::pair<const wchar_t*, int>> kScanCols = {
-        { L"分类", 150 }, { L"风险", 100 }, { L"项目", 300 },
-        { L"大小", 90 }, { L"详情", 260 }, { L"修改时间", 110 },
-    };
     SetListColumns(ui_.list, kScanCols);
     if (oldColCount == static_cast<int>(kScanCols.size())) {
         for (int i = 0; i < oldColCount; ++i) {
-            if (oldWidths[i] > 0) {
-                ListView_SetColumnWidth(ui_.list, i, oldWidths[i]);
-            }
+            if (oldWidths[i] > 0) ListView_SetColumnWidth(ui_.list, i, oldWidths[i]);
         }
     }
-
-    // REVIEW-UI P0 (L-6/04-7): batch renders must not storm
-    // LVN_ITEMCHANGED → UpdateExecButton.
-    batchUpdate_ = true;
-    ListView_DeleteAllItems(ui_.list);
-    auto& items = snapshot_;
-    for (size_t i = 0; i < items.size(); ++i) {
-        const auto& it = items[i];
-        LVITEMW lvi{}; lvi.mask = LVIF_TEXT | LVIF_PARAM;
-        lvi.iItem = static_cast<int>(i);
-        std::wstring cat = LocalizeCategory(it.category);
-        lvi.pszText = cat.data();
-        lvi.lParam  = static_cast<LPARAM>(i);
-        int row = ListView_InsertItem(ui_.list, &lvi);
-        std::wstring badge = RiskBadge(it);
-        ListView_SetItemText(ui_.list, row, 1, badge.data());
-        ListView_SetItemText(ui_.list, row, 2, const_cast<LPWSTR>(it.title.c_str()));
+    SyncCheckDefaults();
+    // Pre-render cell texts (allocation happens once here, not per paint).
+    cells_.assign(snapshot_.size() * kScanCols.size(), std::wstring());
+    for (size_t i = 0; i < snapshot_.size(); ++i) {
+        const auto& it = snapshot_[i];
         std::wstring sz = it.sizeBytes ? FormatSize(it.sizeBytes) : std::wstring(L"—");
-        ListView_SetItemText(ui_.list, row, 3, sz.data());
-        // REVIEW-UI P2 (L-11): one line per cell (LABELTIP shows the rest).
-        std::wstring detail = OneLine(it.detail);
-        ListView_SetItemText(ui_.list, row, 4, detail.data());
-        std::wstring tm = FormatTimeShort(it.createTime);
-        ListView_SetItemText(ui_.list, row, 5, tm.data());
-        // REVIEW-UI P0 (L-1): full per-path check state — an explicit
-        // UNCHECK of a recommended item is preserved as false.
-        auto known = checkStateByPath_.find(ToLower(it.path.wstring()));
-        bool check = (known != checkStateByPath_.end()) ? known->second
-                                                        : it.recommended;
-        ListView_SetCheckState(ui_.list, row, check ? TRUE : FALSE);
+        cells_[i * 6 + 0] = LocalizeCategory(it.category);
+        cells_[i * 6 + 1] = RiskBadge(it);
+        cells_[i * 6 + 2] = it.title;
+        cells_[i * 6 + 3] = std::move(sz);
+        cells_[i * 6 + 4] = OneLine(it.detail);
+        cells_[i * 6 + 5] = FormatTimeShort(it.createTime);
     }
-    batchUpdate_ = false;
+    SendMessageW(ui_.list, LVM_SETITEMCOUNT,
+                 static_cast<WPARAM>(snapshot_.size()), 0);
     RestoreViewState();   // X-7: top row / focus / selection by path
+}
+
+// v2.15: seed the authoritative check map for paths not seen yet.
+void ListTabPresenter::SyncCheckDefaults() {
+    for (const auto& it : snapshot_) {
+        auto key = ToLower(it.path.wstring());
+        checkStateByPath_.try_emplace(key, it.recommended);
+    }
+}
+
+// v2.15: virtual cell supply.
+bool ListTabPresenter::SupplyDispInfo(NMLVDISPINFOW* di) {
+    int row = di->item.iItem;
+    if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return false;
+    if (di->item.mask & LVIF_TEXT) {
+        int col = di->item.iSubItem;
+        if (col < 0 || col > 5) return false;
+        const std::wstring& text = cells_[
+            static_cast<size_t>(row) * 6 + static_cast<size_t>(col)];
+        wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(),
+                  _TRUNCATE);
+    }
+    if (di->item.mask & LVIF_STATE) {
+        // Checkbox image state comes from the authoritative map.
+        if (di->item.stateMask & LVIS_STATEIMAGEMASK) {
+            auto key = ToLower(snapshot_[row].path.wstring());
+            auto it = checkStateByPath_.find(key);
+            bool checked = it != checkStateByPath_.end() && it->second;
+            di->item.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
+        }
+    }
+    return true;
+}
+
+void ListTabPresenter::OnCheckFlipped(int row, bool checked) {
+    if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return;
+    checkStateByPath_[ToLower(snapshot_[row].path.wstring())] = checked;
+}
+
+bool ListTabPresenter::ToggleCheckAt(int row) {
+    if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return false;
+    auto key = ToLower(snapshot_[row].path.wstring());
+    auto it = checkStateByPath_.find(key);
+    bool now = (it == checkStateByPath_.end()) ? !snapshot_[row].recommended
+                                               : !it->second;
+    checkStateByPath_[key] = now;
+    ListView_RedrawItems(ui_.list, row, row);
+    UpdateWindow(ui_.list);
+    return now;
+}
+
+// v2.15: bulk check toggle without any per-row control messages.
+void ListTabPresenter::SetAllChecked(bool on) {
+    for (const auto& it : snapshot_) {
+        checkStateByPath_[ToLower(it.path.wstring())] = on;
+    }
+    // State changed for every row — repaint.
+    ListView_RedrawItems(ui_.list, 0, ListView_GetItemCount(ui_.list) - 1);
+    UpdateWindow(ui_.list);
 }
 
 namespace {
@@ -338,14 +368,13 @@ std::wstring ListTabPresenter::RiskBadge(const ScanItem& it) {
 }
 
 std::vector<size_t> ListTabPresenter::CollectChecked() const {
+    // v2.15: the map is authoritative — one lookup per row, no control
+    // messages (the old loop was 2 messages/row on every update).
     std::vector<size_t> out;
-    int n = ListView_GetItemCount(ui_.list);
-    for (int i = 0; i < n; ++i) {
-        if (!ListView_GetCheckState(ui_.list, i)) continue;
-        LVITEMW lvi{}; lvi.iItem = i; lvi.mask = LVIF_PARAM;
-        ListView_GetItem(ui_.list, &lvi);
-        size_t idx = static_cast<size_t>(lvi.lParam);
-        if (idx < snapshot_.size()) out.push_back(idx);
+    out.reserve(snapshot_.size() / 4 + 1);
+    for (size_t i = 0; i < snapshot_.size(); ++i) {
+        auto it = checkStateByPath_.find(ToLower(snapshot_[i].path.wstring()));
+        if (it != checkStateByPath_.end() && it->second) out.push_back(i);
     }
     return out;
 }
@@ -789,37 +818,41 @@ HistoryPresenter::HistoryPresenter(UiHandles ui, SessionService& svc)
     : TabPresenter(TabId::History), ui_(ui), svc_(svc) {}
 
 void HistoryPresenter::Refresh() {
-    // REVIEW-UI P0 (L-2): this tab's data layout (类型/时间/大小/详情/状态)
-    // differs from the scan tabs' shared headers — switch them per-tab
-    // instead of jamming timestamps into the 84px "风险" column.
+    // v2.15: virtual mode — keep the records + pre-rendered cells, set the
+    // item count; SupplyDispInfo serves the rest.
     SetListColumns(ui_.list, {
         { L"类型", 170 }, { L"时间", 150 }, { L"大小", 90 },
         { L"详情（来源 → 去向）", 420 }, { L"状态", 110 },
     });
-    ListView_DeleteAllItems(ui_.list);
-    auto recs = OperationLog::Instance().LoadAll();
-    for (size_t i = 0; i < recs.size(); ++i) {
-        const auto& r = recs[i];
-        LVITEMW it{}; it.mask = LVIF_TEXT | LVIF_PARAM;
-        it.iItem = static_cast<int>(i);
-        // v2.2 (REVIEW P2 / 07-X20): human-readable type/state instead of
-        // machine codes in column 0.
-        std::wstring c0 = HistoryTypeLabel(r);
-        it.pszText = c0.data();
-        it.lParam = static_cast<LPARAM>(i);
-        int row = ListView_InsertItem(ui_.list, &it);
-        ListView_SetItemText(ui_.list, row, 1, const_cast<LPWSTR>(r.timestamp.c_str()));
-        std::wstring sz = FormatSize(r.sizeBytes);
-        ListView_SetItemText(ui_.list, row, 2, sz.data());
+    rows_ = OperationLog::Instance().LoadAll();
+    cells_.assign(rows_.size() * 5, std::wstring());
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        const auto& r = rows_[i];
         std::wstring detail = r.source;
         if (!r.target.empty()) detail += L"  →  " + r.target;
         if (!r.note.empty())   detail += L"  | " + r.note;
-        // REVIEW-UI P2 (L-11): notes can be multi-line — one line per cell.
-        detail = OneLine(detail);
-        ListView_SetItemText(ui_.list, row, 3, detail.data());
-        std::wstring risk = HistoryRiskLabel(r);
-        ListView_SetItemText(ui_.list, row, 4, risk.data());
+        cells_[i * 5 + 0] = HistoryTypeLabel(r);
+        cells_[i * 5 + 1] = r.timestamp;
+        cells_[i * 5 + 2] = FormatSize(r.sizeBytes);
+        cells_[i * 5 + 3] = OneLine(detail);
+        cells_[i * 5 + 4] = HistoryRiskLabel(r);
     }
+    SendMessageW(ui_.list, LVM_SETITEMCOUNT,
+                 static_cast<WPARAM>(rows_.size()), 0);
+}
+
+bool HistoryPresenter::SupplyDispInfo(NMLVDISPINFOW* di) {
+    int row = di->item.iItem;
+    if (row < 0 || static_cast<size_t>(row) >= rows_.size()) return false;
+    if (di->item.mask & LVIF_TEXT) {
+        int col = di->item.iSubItem;
+        if (col < 0 || col > 4) return false;
+        const std::wstring& text = cells_[
+            static_cast<size_t>(row) * 5 + static_cast<size_t>(col)];
+        wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(),
+                  _TRUNCATE);
+    }
+    return true;   // no checkboxes on this page
 }
 
 std::wstring HistoryPresenter::HistoryTypeLabel(const OpRecord& r) {

@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -44,6 +45,11 @@ public:
     // REVIEW P1-6 (08-F3): double-click / "说明…" opens the explanation.
     virtual void OnItemActivated(int /*row*/) {}
 
+    // v2.15 (round-4 02 P0): the ListView is virtual (LVS_OWNERDATA) —
+    // presenters supply cell text/state through LVN_GETDISPINFO instead of
+    // per-row inserts (1000 rows measured 1.26-1.36 s; virtual ≈ 70 ms).
+    virtual bool SupplyDispInfo(NMLVDISPINFOW* /*di*/) { return false; }
+
 protected:
     TabId tab_;
 };
@@ -61,8 +67,19 @@ public:
     void OnColumnClick(int col) override;
     void OnItemActivated(int row) override;
 
-    // Indices (into the snapshot) of checked rows.
+    // Indices (into the snapshot) of checked rows (v2.15: map-driven —
+    // the virtual list stores no per-item state).
     std::vector<size_t> CollectChecked() const;
+
+    // v2.15 virtual mode: text/state for row `di->item.iItem`.
+    bool SupplyDispInfo(NMLVDISPINFOW* di) override;
+    // v2.15: set every row's check (Ctrl+A / menu) without a message storm.
+    void SetAllChecked(bool on);
+    // v2.15: record a user check-flip from the virtual control into the map.
+    void OnCheckFlipped(int row, bool checked);
+    // v2.15: toggle one row's check; returns the NEW state (drives the
+    // state-icon click / Space paths for virtual lists).
+    bool ToggleCheckAt(int row);
 
     // v2.7/v2.8: drop rows whose path no longer exists on disk (deleted
     // outside the tool). The disk checks run on the SessionService worker
@@ -92,6 +109,7 @@ protected:
     int  sortCol_ = -1;
     bool sortAsc_ = false; // false = descending
     std::vector<ScanItem> snapshot_;   // UI-private copy (REVIEW P1-1)
+    std::vector<std::wstring> cells_;  // v2.15: pre-rendered row texts (6/row)
     // REVIEW-UI P0 (L-1): full per-path check state (true AND false) —
     // survives sorts, tab switches and data refreshes.
     std::map<std::wstring, bool> checkStateByPath_;
@@ -103,8 +121,9 @@ protected:
     std::wstring viewFocusPath_;
     std::vector<std::wstring> viewSelPaths_;
 
-    void CaptureCheckState();          // call before permuting/replacing snapshot_
+    void CaptureCheckState();          // v2.15: no-op (map is authoritative)
     void CaptureViewState();           // X-7: same timing rule as above
+    void SyncCheckDefaults();          // v2.15: seed map for new snapshot paths
     void RestoreViewState();           // X-7: after the insert loop
     void RenderItems();
 
@@ -188,10 +207,13 @@ public:
 
     void Refresh() override;   // render OperationLog records
     void UndoSelected();       // undo the selected record
+    bool SupplyDispInfo(NMLVDISPINFOW* di) override;   // v2.15
 
 private:
     UiHandles ui_;
     SessionService& svc_;
+    std::vector<OpRecord> rows_;   // v2.15: virtual-mode backing store
+    std::vector<std::wstring> cells_;   // pre-rendered per-row texts (col-major)
     static std::wstring HistoryTypeLabel(const OpRecord& r);
     static std::wstring HistoryRiskLabel(const OpRecord& r);
 };

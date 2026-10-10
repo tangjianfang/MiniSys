@@ -164,6 +164,19 @@ int MainWindow::RunMessageLoop() {
             RunSearch();
             continue;
         }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_SPACE &&
+            GetFocus() == h_.list && taskMode_ == TaskMode::None) {
+            // v2.15: Space toggles the focused row's check (virtual mode).
+            if (auto* lp3 =
+                    dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+                int focus = ListView_GetNextItem(h_.list, -1, LVNI_FOCUSED);
+                if (focus >= 0) {
+                    lp3->ToggleCheckAt(focus);
+                    UpdateExecButton();
+                }
+            }
+            continue;
+        }
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE &&
             GetFocus() == h_.editSearch) {
             SetWindowTextW(h_.editSearch, L"");
@@ -238,7 +251,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     (nmlv->uChanged & LVIF_STATE) &&
                     ((nmlv->uNewState ^ nmlv->uOldState) & LVIS_STATEIMAGEMASK);
                 auto* lp2 = dynamic_cast<ListTabPresenter*>(ActivePresenter());
-                if (checkFlipped && !(lp2 && lp2->InBatchUpdate())) {
+                if (checkFlipped && lp2 && !lp2->InBatchUpdate()) {
+                    // v2.15: the authoritative map is written by the
+                    // NM_CLICK / Space paths below; here we only refresh.
                     UpdateExecButton();
                 }
             } else if (nm->hwndFrom == h_.list &&
@@ -400,17 +415,13 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDM_LIST_SELECTALL:
                 case IDM_LIST_SELECTNONE: {
-                    // review-04 R-2: same batch guard as Ctrl+A — without
-                    // it the loop storms LVN_ITEMCHANGED (O(N²) freezes) and
-                    // the exec button count goes stale.
+                    // v2.15: map-based bulk toggle (review-04 R-2's storm is
+                    // structurally impossible now).
                     bool on = (LOWORD(wp) == IDM_LIST_SELECTALL);
-                    auto* lp2 = dynamic_cast<ListTabPresenter*>(ActivePresenter());
-                    if (lp2) lp2->SetBatchUpdate(true);
-                    int n = ListView_GetItemCount(h_.list);
-                    for (int i = 0; i < n; ++i) {
-                        ListView_SetCheckState(h_.list, i, on ? TRUE : FALSE);
+                    if (auto* lp2 =
+                            dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+                        lp2->SetAllChecked(on);
                     }
-                    if (lp2) lp2->SetBatchUpdate(false);
                     UpdateExecButton();
                     break;
                 }
@@ -1877,19 +1888,17 @@ void MainWindow::OnSelectAll() {
     if (t == TabId::History || t == TabId::FolderTree) return;
     int n = ListView_GetItemCount(h_.list);
     if (n == 0) return;
-    int checked = 0;
-    for (int i = 0; i < n; ++i) {
-        if (ListView_GetCheckState(h_.list, i)) ++checked;
+    // v2.15: the virtual list stores no state — count via the map.
+    size_t checked = 0;
+    if (auto* lpc = dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+        checked = lpc->CollectChecked().size();
     }
-    bool target = (checked < n);   // if not everything is checked → select all
-    // REVIEW-UI P1 (L-6/04-7): suppress the per-row event storm, then
-    // recount once.
-    auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
-    if (lp) lp->SetBatchUpdate(true);
-    for (int i = 0; i < n; ++i) {
-        ListView_SetCheckState(h_.list, i, target ? TRUE : FALSE);
+    bool target = (checked < static_cast<size_t>(n));
+    // v2.15: bulk toggle writes the presenter's map + one repaint — zero
+    // per-row messages (the old loop was an O(N²) storm source).
+    if (auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+        lp->SetAllChecked(target);
     }
-    if (lp) lp->SetBatchUpdate(false);
     UpdateExecButton();
 }
 
