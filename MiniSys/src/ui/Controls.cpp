@@ -131,7 +131,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
 
     // ---- FolderTree TreeView ----
     h.tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
-        WS_CHILD | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
+        WS_CHILD | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_TREEVIEW), inst, nullptr);
 
     // ---- About (always visible, right-aligned by the layout) ----

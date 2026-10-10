@@ -841,6 +841,9 @@ std::wstring HistoryPresenter::HistoryTypeLabel(const OpRecord& r) {
 }
 
 std::wstring HistoryPresenter::HistoryRiskLabel(const OpRecord& r) {
+    // X-27a (round-4 07): unsigned records still advertised "🛡 可还原" —
+    // undo refuses them; the column must say so.
+    if (!OperationLog::VerifySignature(r)) return L"⧗ 未签名";
     if (r.status == OpStatus::Failed ||
         r.status == OpStatus::Interrupted) return L"× 需关注";
     if (r.type == OpType::EmptyRecycleBin) return L"⚠ 不可逆";

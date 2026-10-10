@@ -150,6 +150,7 @@ void AppScanner::Scan(std::vector<ScanItem>& out,
             it.lastWriteFiletime =
                 (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
                 static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+            it.createTime = it.lastWriteFiletime;   // 07/r4: 修改时间列数据
         }
         out.push_back(std::move(it));
     }

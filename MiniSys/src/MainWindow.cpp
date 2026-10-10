@@ -218,7 +218,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             // button row clips and on the Apps page targetBtn overlaps
             // advancedChk (W < 1068). Clamp to the layout's real floor.
             auto mmi = reinterpret_cast<LPMINMAXINFO>(lp);
-            mmi->ptMinTrackSize.x = UiScale(hwnd_, 980);
+            mmi->ptMinTrackSize.x = UiScale(hwnd_, 1080);   // X-31: Apps collision floor is 1068
             mmi->ptMinTrackSize.y = UiScale(hwnd_, 560);
             return 0;
         }
@@ -518,16 +518,23 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 if (idleCountdown_ <= 0 || !GetLastInputInfo(&li) ||
                     li.dwTime != idleArmInput_ || taskMode_ != TaskMode::None) {
                     idleCountdown_ = 0;
+                    // X-29: leave a clean pane instead of the frozen countdown.
+                    SessionService::Instance().SetProgressText(L"已取消空闲刷新");
+                    UpdateStatusBar();
                     return 0;   // user came back — cancelled
                 }
                 --idleCountdown_;
                 if (idleCountdown_ > 0) {
-                    ShowHint(FormatW(L"ℹ 系统空闲 — %d 秒后自动刷新本页扫描结果（动一下鼠标或键盘即取消）",
-                                     idleCountdown_));
+                    // X-29 (round-4 07): per-second text goes to the STATUS
+                    // pane — the info dashboard must not churn (X-3 relapse).
+                    SessionService::Instance().SetProgressText(
+                        FormatW(L"空闲 %d 秒后自动刷新（动一下即取消）", idleCountdown_));
+                    UpdateStatusBar();
                     SetTimer(hwnd_, TIMER_IDLE_COUNTDOWN, 1000, nullptr);
                     return 0;
                 }
-                ShowHint(L"ℹ 系统空闲 — 正在自动刷新本页扫描结果…");
+                SessionService::Instance().SetProgressText(L"系统空闲 — 自动刷新中…");
+                UpdateStatusBar();
                 OnScan();
             }
             return 0;
@@ -793,7 +800,7 @@ void MainWindow::OnCommandPalette() {
     add(L"清空隔离区…", [this] { OnEmptyQuarantine(); });
     add(L"关于 MiniSys", [this] { OnAbout(); });
     add(L"设置开发缓存扫描根…", [this] { OnDevCacheRoots(); });
-    add(L"信任并签名旧操作记录…", [this] {
+    add(L"信任并签名旧记录…", [this] {
         // v2.14 (T-A1): upgrade path — legacy unsigned records are undo-
         // blocked by default; the admin explicitly adopts the ones whose
         // quarantine target sits under a MiniSys.Quarantine root.
@@ -1083,7 +1090,8 @@ void MainWindow::OnIdleCheck() {
 
     idleCountdown_ = 10;
     idleArmInput_ = li.dwTime;
-    ShowHint(L"ℹ 系统空闲 — 10 秒后自动刷新本页扫描结果（动一下鼠标或键盘即取消）");
+    SessionService::Instance().SetProgressText(L"空闲 10 秒后自动刷新（动一下即取消）");
+    UpdateStatusBar();
     SetTimer(hwnd_, TIMER_IDLE_COUNTDOWN, 1000, nullptr);
 }
 
@@ -1390,6 +1398,7 @@ void MainWindow::OnScanDone() {
     } else {
         SetWindowTextW(h_.info, (ComposeScanTimeLine() + tabInfoText_).c_str());
     }
+    OnSize();   // X-28: re-measure the adaptive info height
     UpdateStatusBar();
     UpdateExecButton();
 }
@@ -1512,6 +1521,9 @@ void MainWindow::ShowHint(const std::wstring& text) {
     // instead of a MessageBox — modal popups are reserved for confirmations
     // and errors (v2.2 dialog-noise fix).
     SetWindowTextW(h_.info, text.c_str());
+    // X-28 (round-4 07): the info height follows its TEXT — re-layout, or
+    // longer hints/scan results clip at the old height.
+    OnSize();
 }
 
 void MainWindow::OnExecute() {
@@ -1776,7 +1788,7 @@ void MainWindow::OnAbout() {
         L"安全、可逆的磁盘清理与迁移工具（所有固定磁盘）。所有文件操作先经安全闸复验，"
         L"默认移入隔离区、可一键还原。\n"
         L"\n【使用说明】\n"
-        L"· 垃圾清理：扫描后勾选执行，项目移入隔离区；“清空隔离区”才真正释放空间。"
+        L"· Ctrl+K 命令面板：所有操作零层级直达。垃圾清理：勾选执行，项目移入隔离区（可还原）。"
         L"含程序员构建缓存（bin/obj/.vs 等）。\n"
         L"· 文件搜索：输入即搜全盘（参考 Everything）；“快速筛选”一键列出 .pdb/.obj/Debug 文件夹"
         L"等；双击定位文件；索引缓存加速启动并自动增量更新。\n"
