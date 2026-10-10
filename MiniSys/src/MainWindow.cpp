@@ -535,6 +535,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             // hand — verify the visible list shortly (debounced; a one-shot
             // timer so the activation burst doesn't run during redraw).
             if (LOWORD(wp) != WA_INACTIVE && HIWORD(wp) == 0) {
+                // B-3: the user is back — idle maintenance yields at its
+                // next checkpoint (their own scans are never cancelled).
+                auto& svc = SessionService::Instance();
+                if (svc.IsVerifying()) svc.CancelScan();
                 SetTimer(hwnd_, TIMER_VERIFY_LIST, 400, nullptr);
             }
             return 0;
@@ -1043,7 +1047,13 @@ void MainWindow::OnIdleCheck() {
         // v2.11: not stale enough for a full rescan, but stale enough for
         // idle maintenance — journal deltas + ghost prune through the index
         // (near-zero cost, keeps every tab's data fresh without rescanning).
-        if (ageMs >= 10ULL * 60 * 1000) {
+        // B-3 (review-03, CONFIRMED): no cooldown + no cancel path meant
+        // the 30 s tick re-fired maintenance forever while idle, and the
+        // returning user could neither cancel it nor start their own work.
+        // Now: ≥15 min between runs, and WM_ACTIVATE cancels a running one.
+        if (ageMs >= 10ULL * 60 * 1000 &&
+            GetTickCount64() - lastIdleMaintTick_ > 15ULL * 60 * 1000) {
+            lastIdleMaintTick_ = GetTickCount64();
             svc.IdleMaintenanceAsync();
         }
         return;

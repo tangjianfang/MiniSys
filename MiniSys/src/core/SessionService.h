@@ -36,6 +36,9 @@ public:
     bool IsBusy() const { return taskKind_.load() != 0; }
     bool IsScanning() const { return taskKind_.load() == static_cast<int>(TaskKind::Scanning); }
     bool IsSearching() const { return taskKind_.load() == static_cast<int>(TaskKind::Searching); }
+    // B-3 (review-03): idle maintenance runs as Verifying — the UI needs to
+    // tell it apart so a returning user can cancel it (never their scans).
+    bool IsVerifying() const { return taskKind_.load() == static_cast<int>(TaskKind::Verifying); }
     void CancelScan() { cancelScan_.store(true); }
 
     // review-04 R-4 fix (v2.10): monotonic task generation. Every DONE /

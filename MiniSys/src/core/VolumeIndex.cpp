@@ -642,7 +642,15 @@ bool VolumeIndex::WalkBuild(wchar_t drive,
 void VolumeIndex::RefreshWalk(const std::function<void(const std::wstring&)>& progress,
                               const std::atomic<bool>& cancel) {
     if (!walkBuilt_) return;
-    WalkBuild(drive_, progress, cancel);
+    // B-2 (review-03, CONFIRMED): WalkBuild replaces nodes_ but only
+    // BuildFull ever Finalize()d afterwards — called directly here the
+    // lookup tables (byFrn_/dirPaths_) kept pointing at the OLD synthetic
+    // tree with overlapping FRNs: search paths spliced wrong and the ghost
+    // prune judged LIVE rows dead via the stale dirPaths_.
+    if (WalkBuild(drive_, progress, cancel)) {
+        Finalize();
+        entryCount_.store(nodes_.size(), std::memory_order_release);
+    }
 }
 
 bool VolumeIndex::RefreshFromUsn(const std::atomic<bool>& cancel) {
@@ -1223,6 +1231,12 @@ void VolumeIndex::SaveCacheIfWorthwhile() const {
               fwrite(&volumeSerial_, 8, 1, f) == 1 &&
               fwrite(&journalId_, 8, 1, f) == 1 &&
               fwrite(&nextUsn_, 8, 1, f) == 1;
+    // B-1 (review-03, CONFIRMED): the reader has expected a walk-flag byte
+    // since v2.13a but the writer never emitted one — every cache load
+    // misparsed and failed, forcing a full ~20 s rebuild + 250 MB rewrite
+    // every session ("restart instant" never actually worked).
+    uint8_t walkFlag = walkBuilt_ ? 1 : 0;
+    ok = ok && fwrite(&walkFlag, 1, 1, f) == 1;
     uint64_t nodeCount = nodes_.size();
     uint64_t nameBytes = names_.size() * sizeof(wchar_t);
     ok = ok && fwrite(&nodeCount, 8, 1, f) == 1 && fwrite(&nameBytes, 8, 1, f) == 1;
