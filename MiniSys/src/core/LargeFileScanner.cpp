@@ -61,10 +61,15 @@ std::vector<fs::path> DefaultExcludes() {
 }
 
 std::vector<fs::path> DefaultRoots() {
-    // v2 (R-006 fix): scan the system drive only — the user profile lives
-    // under it, and listing both roots made every profile file appear twice
-    // (duplicate top-N rows + false duplicate pairs).
-    return { fs::path(SystemDriveRoot()) };
+    // v2.14 (round-4 08 / H3): 磁盘瘦身助手 — ALL fixed drives by default.
+    // (v2's system-drive-only rule, R-006, guarded against OVERLAPPING
+    // roots double-counting the profile; distinct per-drive roots don't
+    // overlap, and cross-drive duplicates are exactly what the tool should
+    // surface now.)
+    std::vector<fs::path> roots;
+    for (const auto& d : EnumerateDrives()) roots.push_back(fs::path(d));
+    if (roots.empty()) roots.push_back(fs::path(SystemDriveRoot()));
+    return roots;
 }
 
 struct Entry {

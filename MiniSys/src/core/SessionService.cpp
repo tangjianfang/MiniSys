@@ -19,6 +19,7 @@
 #include <objbase.h>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -78,6 +79,10 @@ void SessionService::Post(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wp = static_cast<WPARAM>(taskGen_.load());
     }
     PostMessageW(hwnd, msg, wp, lp);
+}
+
+void SessionService::NotifyTaskStarted() {
+    Post(hwnd_, WM_APP_TASK_STARTED);   // R-3: gen-stamped, never dropped
 }
 
 std::wstring SessionService::ProgressText() const {
@@ -472,12 +477,11 @@ bool SessionService::IdleMaintenanceAsync() {
             SaveResultsCache(tab);     // persist the pruned list
             {
                 std::lock_guard<std::mutex> g(verifyMu_);
-                lastDead_ = std::move(dead);
-                lastVerifyTab_ = tab;
+                lastDeadByTab_[static_cast<int>(tab)] = std::move(dead);
             }
             ++prunedTabs;
             prunedRows += removed;
-            Post(hwnd, WM_APP_VERIFY_DONE);
+            Post(hwnd, WM_APP_VERIFY_DONE, 0, static_cast<LPARAM>(tab));
         }
 
         SetProgress(prunedTabs
@@ -990,24 +994,20 @@ bool SessionService::VerifyPathsAsync(TabId tab, std::vector<std::wstring> paths
         }
         {
             std::lock_guard<std::mutex> g(verifyMu_);
-            lastDead_ = std::move(dead);
-            lastVerifyTab_ = tab;
+            lastDeadByTab_[static_cast<int>(tab)] = std::move(dead);
         }
         SetProgress(deadCount == 0
             ? L"校验完成：列表均为最新"
             : FormatW(L"校验完成：%zu 项已在磁盘上不存在", deadCount));
-        Post(hwnd, WM_APP_VERIFY_DONE);
+        Post(hwnd, WM_APP_VERIFY_DONE, 0, static_cast<LPARAM>(tab));
     });
 }
 
-std::vector<std::wstring> SessionService::LastDeadPaths() const {
+std::vector<std::wstring> SessionService::LastDeadPaths(TabId tab) const {
     std::lock_guard<std::mutex> g(verifyMu_);
-    return lastDead_;
-}
-
-TabId SessionService::LastVerifyTab() const {
-    std::lock_guard<std::mutex> g(verifyMu_);
-    return lastVerifyTab_;
+    auto it = lastDeadByTab_.find(static_cast<int>(tab));
+    return it == lastDeadByTab_.end() ? std::vector<std::wstring>()
+                                      : it->second;
 }
 
 bool SessionService::PreviewAsync(TabId tab, std::vector<ScanItem> items,

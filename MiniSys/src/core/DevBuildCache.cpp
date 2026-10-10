@@ -265,7 +265,11 @@ void Scan(std::vector<ScanItem>& out,
                 subtree.insert(subtree.end(), deeper.begin(), deeper.end());
             }
         }
-        {
+        // R-5 (round-4 04): a cancelled walk must NOT store its partial
+        // subtree under an unchanged mtime — the session would then keep
+        // serving the missing artifacts as "exact". (Listing failures keep
+        // the previous entry for the same reason.)
+        if (!cancel.load()) {
             std::lock_guard<std::mutex> g(cacheMu);
             dirCache[key] = DirEntryCache{ dirMtime, subtree };
         }

@@ -136,6 +136,7 @@ void Show(HWND owner, const std::vector<Command>& commands) {
 
     // Modal loop (main-window style: pre-dispatch interception for keys).
     MSG msg;
+    bool quitEaten = false;
     while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == WM_KEYDOWN) {
             if (msg.wParam == VK_ESCAPE) break;
@@ -156,6 +157,14 @@ void Show(HWND owner, const std::vector<Command>& commands) {
                 continue;
             }
         }
+        if (msg.message == WM_QUIT) {
+            // R-2 (round-4 04): the owner stays enabled while the palette is
+            // open — clicking its X posts WM_QUIT that THIS loop would eat,
+            // leaving an unkillable-by-close elevated zombie. Remember it and
+            // re-post on exit.
+            quitEaten = true;
+            break;
+        }
         if (!IsDialogMessageW(st.wnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -172,6 +181,8 @@ void Show(HWND owner, const std::vector<Command>& commands) {
     }
     if (IsWindow(st.wnd)) DestroyWindow(st.wnd);
     if (haveRun) toRun.run();
+    // R-2: hand a consumed WM_QUIT back to the owner's loop (see above).
+    if (quitEaten) PostQuitMessage(static_cast<int>(msg.wParam));
 }
 
 } // namespace palette

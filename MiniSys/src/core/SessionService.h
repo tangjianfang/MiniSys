@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <atomic>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -129,6 +130,10 @@ public:
     // finished search's "匹配 0 项(索引共…)" used to linger in pane 2 on
     // every other page.
     void SetProgressText(const std::wstring& text) { SetProgress(text); }
+    // v2.14 (round-4 04 / R-3): gen-stamped WM_APP_TASK_STARTED — presenters
+    // used to post it with wp=0, which the v2.10 generation gate dropped
+    // (folder-tree quarantine / history undo ran with the matrix unlocked).
+    void NotifyTaskStarted();
 
     // ---- undo ------------------------------------------------------------
     enum class UndoResult { Ok, NotReversible, DeleteType, Failed };
@@ -136,11 +141,13 @@ public:
 
     // ---- v2.8 read-only helpers on the worker ------------------------------
     // Batch existence check for a tab's visible list ("deleted by hand in
-    // Explorer"). Completion posts WM_APP_VERIFY_DONE; the dead paths are
-    // then available via LastDeadPaths()/LastVerifyTab().
+    // Explorer"). Completion posts WM_APP_VERIFY_DONE with the tab in
+    // LPARAM; the dead paths are then available via LastDeadPaths(tab).
     bool VerifyPathsAsync(TabId tab, std::vector<std::wstring> paths);
-    std::vector<std::wstring> LastDeadPaths() const;
-    TabId LastVerifyTab() const;
+    // R-4 (round-4 04): results are per-tab — VERIFY_DONE carries the tab
+    // in LPARAM; the UI reads that tab's list (a single shared slot was
+    // overwritten by consecutive per-tab posts from idle maintenance).
+    std::vector<std::wstring> LastDeadPaths(TabId tab) const;
 
     // GuardRails dry-run ("预览执行") over the checked rows. Completion posts
     // WM_APP_PREVIEW_DONE; the report is in LastPreview(). The canonical-
@@ -203,8 +210,7 @@ private:
 
     // v2.8 verify / preview results (worker writes, UI reads on DONE).
     mutable std::mutex verifyMu_;
-    std::vector<std::wstring> lastDead_;
-    TabId lastVerifyTab_ = TabId::Junk;
+    std::map<int, std::vector<std::wstring>> lastDeadByTab_;   // R-4
     mutable std::mutex previewMu_;
     PreviewReport lastPreview_;
 };

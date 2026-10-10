@@ -477,7 +477,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_VERIFY_DONE:
             if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
-            OnVerifyDone();
+            OnVerifyDone(static_cast<TabId>(lp));
             UpdateStatusBar();
             return 0;
         case WM_APP_PREVIEW_DONE:
@@ -745,13 +745,14 @@ void MainWindow::OnVerifyList(bool manual) {
 
 // v2.8: worker verify finished — prune the ghost rows (even if the user
 // switched tabs meanwhile; the presenter outlives the switch).
-void MainWindow::OnVerifyDone() {
+// R-4 (round-4 04): the tab arrives in LPARAM (idle maintenance posts one
+// VERIFY_DONE per pruned tab — a single shared slot got overwritten).
+void MainWindow::OnVerifyDone(TabId tab) {
     auto& svc = SessionService::Instance();
-    auto dead = svc.LastDeadPaths();
+    auto dead = svc.LastDeadPaths(tab);
     // review-07 X-3: nothing removed → silent success (pane2 already says
     // "校验完成"). This used to clobber the info dashboard on EVERY Alt-Tab.
     if (dead.empty()) return;
-    auto tab = svc.LastVerifyTab();
     if (tab < TabId::Junk || tab >= TabId::Count) return;
     auto* lp = dynamic_cast<ListTabPresenter*>(
         presenters_[static_cast<size_t>(tab)].get());
@@ -858,9 +859,15 @@ LRESULT CALLBACK RootsDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_COMMAND:
             switch (LOWORD(w)) {
                 case IDOK: {
+                    // R-1 (round-4 04): the EDIT's control id used to be 1
+                    // (== IDOK) and EN_CHANGE arrived here unchecked — the
+                    // dialog destroyed itself on the first keystroke and the
+                    // un-flushed text then WIPED the stored roots. Edit now
+                    // has id 1001; only real button clicks count.
+                    if (HIWORD(w) != BN_CLICKED) break;
                     auto* st = reinterpret_cast<RootsDlgState*>(
                         GetWindowLongPtrW(h, GWLP_USERDATA));
-                    HWND edit = GetDlgItem(h, 1);
+                    HWND edit = GetDlgItem(h, 1001);
                     int len = GetWindowTextLengthW(edit);
                     std::wstring text(static_cast<size_t>(len) + 1, L'\0');
                     GetWindowTextW(edit, text.data(), len + 1);
@@ -874,7 +881,7 @@ LRESULT CALLBACK RootsDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                         cur.clear();
                     };
                     for (wchar_t ch : text) {
-                        if (ch == L'\n') flush;
+                        if (ch == L'\n') flush();
                         else if (ch != L'\r') cur += ch;
                     }
                     flush();
@@ -962,7 +969,7 @@ void MainWindow::OnDevCacheRoots() {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
             WS_VSCROLL,
         UiScale(hwnd_, 10), UiScale(hwnd_, 32), W - UiScale(hwnd_, 30),
-        H - UiScale(hwnd_, 100), 1);
+        H - UiScale(hwnd_, 100), 1001);
     mk(L"BUTTON", L"浏览添加…",
        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
        UiScale(hwnd_, 10), H - UiScale(hwnd_, 60), UiScale(hwnd_, 110),
@@ -1008,7 +1015,7 @@ void MainWindow::OnDevCacheRoots() {
         cur.clear();
     };
     for (wchar_t ch : st.joined) {
-        if (ch == L';') flush;
+        if (ch == L';') flush();
         else cur += ch;
     }
     flush();

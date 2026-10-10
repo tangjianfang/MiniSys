@@ -768,7 +768,7 @@ bool FolderTreePresenter::OnContextMenu() {
                 // REVIEW P0-5 (03-B5): this path used to run without
                 // disabling anything — tell the main window to lock the
                 // action matrix while the plan executes.
-                PostMessageW(ui_.main, WM_APP_TASK_STARTED, 0, 0);
+                svc_.NotifyTaskStarted();   // R-3: gen-stamped (wp=0 was dropped)
                 return true;
             case SessionService::PlanStart::Busy:
                 SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
@@ -885,7 +885,7 @@ void HistoryPresenter::UndoSelected() {
         SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
         return;
     }
-    PostMessageW(ui_.main, WM_APP_TASK_STARTED, 0, 0);
+    svc_.NotifyTaskStarted();   // R-3: gen-stamped (wp=0 was dropped)
 }
 
 } // namespace minisys
