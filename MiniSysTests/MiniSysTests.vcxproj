@@ -109,6 +109,7 @@
     <ClCompile Include="..\MiniSys\src\platform\Junction.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\RestartManager.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\SystemRestore.cpp" />
+    <ClCompile Include="..\MiniSys\src\platform\SecretStore.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Privilege.cpp" />
     <ClCompile Include="..\MiniSys\src\platform\Hash.cpp" />
     <ClCompile Include="..\MiniSys\src\util\Json.cpp" />

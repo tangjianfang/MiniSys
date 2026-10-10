@@ -864,16 +864,20 @@ void HistoryPresenter::UndoSelected() {
     }
 
     // Pre-flight eligibility classification for a clear hint.
-    size_t eligible = 0, notReversible = 0, deleteType = 0;
+    size_t eligible = 0, notReversible = 0, deleteType = 0, unsignedN = 0;
     for (const auto& r : selected) {
-        if (!r.isReversible || r.status != OpStatus::Success) ++notReversible;
+        // v2.14 (T-A1): unsigned / tampered records are display-only.
+        if (!OperationLog::VerifySignature(r)) { ++unsignedN; }
+        else if (!r.isReversible || r.status != OpStatus::Success) ++notReversible;
         else if (r.type != OpType::MoveAndJunction && r.type != OpType::Quarantine) ++deleteType;
         else ++eligible;
     }
     if (eligible == 0) {
-        SetWindowTextW(ui_.info, deleteType
+        SetWindowTextW(ui_.info, unsignedN
+            ? L"ℹ 选中记录缺少有效签名（升级前的旧记录或被篡改），禁止还原——可在命令面板中“信任并签名旧记录”。"
+            : (deleteType
             ? L"ℹ 选中项均为回收站删除（请手动从回收站还原）。"
-            : L"ℹ 选中记录不可撤销（仅成功且可逆的记录支持）。");
+            : L"ℹ 选中记录不可撤销（仅成功且可逆的记录支持）。"));
         return;
     }
 

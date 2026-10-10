@@ -1,5 +1,6 @@
 #include "core/VolumeIndex.h"
 
+#include "platform/SecretStore.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
 #include "core/JunkRules.h"
@@ -218,7 +219,23 @@ void VolumeIndex::Finalize() {
                     stack.push_back({ci, rootLower});
                 }
             }
+            // v2.14 (review-05 T-A3): a poisoned cache can encode an FRN
+            // cycle; the DFS then loops forever (live test: 25 s hang,
+            // 1.9 GB and climbing). A total-iteration budget turns the
+            // hang into a rejected load.
+            size_t budget = nodes_.size() * 2 + 16;
             while (!stack.empty()) {
+                if (--budget == 0) {
+                    MS_LOG_WARN(L"VolumeIndex: Finalize aborted — FRN cycle "
+                                L"detected (poisoned cache?)");
+                    byFrn_.clear();
+                    childrenOf_.clear();
+                    dirPaths_.clear();
+                    frnToDirPath_.clear();
+                    ready_ = false;
+                    valid_.store(false, std::memory_order_release);
+                    return;
+                }
                 auto [idx, parentPath] = stack.back();
                 stack.pop_back();
                 const auto& cn = nodes_[idx];
@@ -1105,8 +1122,16 @@ size_t VolumeIndex::Search(const std::wstring& query, bool matchPath,
 
 namespace {
 constexpr uint32_t kCacheMagic   = 0x5853494D;   // "MISX"
-constexpr uint32_t kCacheVersion = 2;
+// v3 (v2.14, review-05 T-A2): 32-byte HMAC-SHA256 trailer over the whole
+// preceding file, keyed with the admin-ACLed machine secret — a poisoned
+// cache (fake SAM paths, known-absent suppression, FRN cycles) can no
+// longer survive a session restart. v2 files load only when the secret is
+// unavailable (unelevated contexts).
+constexpr uint32_t kCacheVersion = 3;
+constexpr uint32_t kCacheVersionUnsigned = 2;
 constexpr size_t   kMinCachedEntries = 10000;    // never persist a truncated index
+constexpr uint64_t kMaxNameBytes = 0x30000000ull;   // 768 MB pool cap (T-A4)
+constexpr uint32_t kMaxNameLen  = 1024;             // no real name is longer
 
 #pragma pack(push, 1)
 struct CacheRow {
@@ -1136,10 +1161,17 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
     FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
     if (!f) return false;
     bool ok = false;
+    auto secret = GetOrCreateMachineSecret();
     do {
         uint32_t magic = 0, version = 0;
         if (fread(&magic, 4, 1, f) != 1 || magic != kCacheMagic) break;
-        if (fread(&version, 4, 1, f) != 1 || version != kCacheVersion) break;
+        if (fread(&version, 4, 1, f) != 1) break;
+        // v3 (signed) always acceptable; v2 only when we cannot sign
+        // ourselves (unelevated test contexts) — never accept a DOWNGRADE.
+        if (version != kCacheVersion &&
+            !(version == kCacheVersionUnsigned && secret.empty())) break;
+        const bool signedFile = (version == kCacheVersion);
+
         wchar_t cDrive = 0;
         uint64_t cSerial = 0, cJournal = 0, cNodeCount = 0, cNameBytes = 0;
         int64_t cNextUsn = 0;
@@ -1153,6 +1185,7 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
         if (fread(&cNameBytes, 8, 1, f) != 1) break;
         if (cDrive != drive || cNodeCount < kMinCachedEntries ||
             cNodeCount > 50000000 || cNameBytes == 0 ||
+            cNameBytes > kMaxNameBytes ||                 // T-A4
             cNameBytes % sizeof(wchar_t) != 0) {
             break;
         }
@@ -1161,6 +1194,39 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
         if (!GetVolumeInformationW(RootPath(drive).c_str(), nullptr, 0, &serial,
                                    nullptr, nullptr, nullptr, 0)) break;
         if (static_cast<uint64_t>(serial) != cSerial) break;
+
+        // T-A2: verify the MAC BEFORE parsing the payload. Stream the whole
+        // file (header+rows+names), then compare the trailing 32 bytes.
+        uint64_t dataEnd = 0;
+        std::vector<uint8_t> expectMac;
+        if (signedFile) {
+            if (_fseeki64(f, 0, SEEK_END) != 0) break;
+            uint64_t fileSize = static_cast<uint64_t>(_ftelli64(f));
+            if (fileSize < 32) break;
+            dataEnd = fileSize - 32;
+            if (_fseeki64(f, dataEnd, SEEK_SET) != 0) break;
+            expectMac.resize(32);
+            if (fread(expectMac.data(), 1, 32, f) != 32) break;
+            if (_fseeki64(f, 0, SEEK_SET) != 0) break;
+            HmacSha256 ctx(secret);
+            std::vector<uint8_t> chunk(1 << 20);
+            uint64_t done = 0;
+            while (done < dataEnd) {
+                size_t want = static_cast<size_t>(std::min<uint64_t>(
+                    chunk.size(), dataEnd - done));
+                if (fread(chunk.data(), 1, want, f) != want) { expectMac.clear(); break; }
+                ctx.Update(chunk.data(), want);
+                done += want;
+            }
+            if (expectMac.empty() || expectMac != ctx.Finish()) {
+                MS_LOG_WARN(L"VolumeIndex: cache MAC mismatch for %c: — rejected "
+                            L"(poisoned?)", drive);
+                break;
+            }
+            // Rewind to the header for the parsing pass.
+            if (_fseeki64(f, 0, SEEK_SET) != 0) break;
+            if (fread(&magic, 4, 1, f) != 1 || fread(&version, 4, 1, f) != 1) break;
+        }
 
         nodes_.resize(static_cast<size_t>(cNodeCount));
         CacheRow row{};
@@ -1182,10 +1248,11 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
             break;
         }
         // Name offsets must land inside the pool — a corrupt file is
-        // silently discarded rather than trusted.
+        // silently discarded rather than trusted. (T-A4: name length cap.)
         bool boundsOk = true;
         for (const auto& n : nodes_) {
-            if (n.nameOff > names_.size() ||
+            if (n.nameLen > kMaxNameLen ||
+                n.nameOff > names_.size() ||
                 names_.size() - n.nameOff < n.nameLen) {
                 boundsOk = false;
                 break;
@@ -1199,12 +1266,14 @@ bool VolumeIndex::TryLoadCache(wchar_t drive) {
         nextUsn_      = cNextUsn;
         walkBuilt_    = (cWalk != 0);
         Finalize();
+        if (!ready_) break;   // T-A3 guard may have rejected an FRN cycle
         entryCount_.store(nodes_.size(), std::memory_order_release);
         valid_.store(true, std::memory_order_release);
         ok = true;
         MS_LOG_INFO(L"VolumeIndex: loaded cache for %c: — %zu entries "
-                    L"(journal cursor %lld)", drive_, nodes_.size(),
-                    static_cast<long long>(nextUsn_));
+                    L"(journal cursor %lld, %s)", drive_, nodes_.size(),
+                    static_cast<long long>(nextUsn_),
+                    signedFile ? L"MAC verified" : L"unsigned");
     } while (false);
     fclose(f);
     if (!ok) {
@@ -1225,21 +1294,33 @@ void VolumeIndex::SaveCacheIfWorthwhile() const {
     tmp += L".tmp";
     FILE* f = _wfsopen(tmp.c_str(), L"wb", _SH_DENYWR);
     if (!f) return;
-    bool ok = fwrite(&kCacheMagic, 4, 1, f) == 1 &&
-              fwrite(&kCacheVersion, 4, 1, f) == 1 &&
-              fwrite(&drive_, sizeof(wchar_t), 1, f) == 1 &&
-              fwrite(&volumeSerial_, 8, 1, f) == 1 &&
-              fwrite(&journalId_, 8, 1, f) == 1 &&
-              fwrite(&nextUsn_, 8, 1, f) == 1;
+
+    // T-A2 (v2.14): v3 files carry an HMAC trailer (admin-ACLed secret);
+    // when the secret is unavailable we fall back to unsigned v2 so
+    // unelevated contexts keep working.
+    auto secret = GetOrCreateMachineSecret();
+    const bool sign = !secret.empty();
+    HmacSha256 mac(secret);
+    const uint32_t version = sign ? kCacheVersion : kCacheVersionUnsigned;
+
+    bool ok = true;
+    auto w = [&](const void* p, size_t bytes) -> bool {
+        if (fwrite(p, bytes, 1, f) != 1) return false;
+        if (sign) mac.Update(p, bytes);
+        return true;
+    };
+    ok = ok && w(&kCacheMagic, 4) && w(&version, 4) &&
+         w(&drive_, sizeof(wchar_t)) && w(&volumeSerial_, 8) &&
+         w(&journalId_, 8) && w(&nextUsn_, 8);
     // B-1 (review-03, CONFIRMED): the reader has expected a walk-flag byte
     // since v2.13a but the writer never emitted one — every cache load
     // misparsed and failed, forcing a full ~20 s rebuild + 250 MB rewrite
     // every session ("restart instant" never actually worked).
     uint8_t walkFlag = walkBuilt_ ? 1 : 0;
-    ok = ok && fwrite(&walkFlag, 1, 1, f) == 1;
+    ok = ok && w(&walkFlag, 1);
     uint64_t nodeCount = nodes_.size();
     uint64_t nameBytes = names_.size() * sizeof(wchar_t);
-    ok = ok && fwrite(&nodeCount, 8, 1, f) == 1 && fwrite(&nameBytes, 8, 1, f) == 1;
+    ok = ok && w(&nodeCount, 8) && w(&nameBytes, 8);
 
     CacheRow row{};
     for (const auto& n : nodes_) {
@@ -1250,11 +1331,15 @@ void VolumeIndex::SaveCacheIfWorthwhile() const {
         row.nameLen   = n.nameLen;
         row.attrs     = n.attrs;
         row.isDir     = n.isDir ? 1 : 0;
-        if (fwrite(&row, sizeof(row), 1, f) != 1) { ok = false; break; }
+        if (!w(&row, sizeof(row))) { ok = false; break; }
     }
     ok = ok && (names_.empty() ||
-                fwrite(names_.data(), sizeof(wchar_t), names_.size(), f) ==
-                    names_.size());
+                w(names_.data(), names_.size() * sizeof(wchar_t)));
+    if (ok && sign) {
+        auto trailer = mac.Finish();
+        ok = !trailer.empty() &&
+             fwrite(trailer.data(), trailer.size(), 1, f) == 1;
+    }
     fclose(f);
     if (ok) {
         std::error_code ec;

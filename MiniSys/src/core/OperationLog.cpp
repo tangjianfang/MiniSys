@@ -1,5 +1,6 @@
 #include "core/OperationLog.h"
 
+#include "platform/SecretStore.h"
 #include "util/Json.h"
 #include "util/Logger.h"
 #include "util/PathUtils.h"
@@ -85,6 +86,14 @@ bool ParseLegacyTsvLine(const std::wstring& line, OpRecord& r) {
 
 // ---------- JSONL ----------
 
+// v2.14 (T-A1): canonical field string that the signature covers.
+std::wstring SignedFieldsOf(const OpRecord& r) {
+    return OperationLog::TypeToStr(r.type) + L"|" + r.id + L"|" + r.source +
+           L"|" + r.target + L"|" + r.note + L"|" +
+           std::to_wstring(r.sizeBytes) + L"|" +
+           OperationLog::StatusToStr(r.status);
+}
+
 Json RecordToJson(const OpRecord& r) {
     Json j = Json::Object();
     j.Set(L"id", Json(r.id));
@@ -96,6 +105,7 @@ Json RecordToJson(const OpRecord& r) {
     j.Set(L"source", Json(r.source));
     j.Set(L"target", Json(r.target));
     j.Set(L"note", Json(r.note));
+    if (!r.sig.empty()) j.Set(L"_sig", Json(r.sig));
     return j;
 }
 
@@ -113,6 +123,7 @@ bool ParseJsonlLine(const std::wstring& line, OpRecord& r) {
     r.source      = j.Get(L"source").AsString();
     r.target      = j.Get(L"target").AsString();
     r.note        = j.Get(L"note").AsString();
+    r.sig         = j.Get(L"_sig").AsString();   // v2.14: absent = legacy
     return true;
 }
 
@@ -218,8 +229,49 @@ void OperationLog::Append(const OpRecord& rec) {
         MS_LOG_WARN(L"Failed to open history file for append");
         return;
     }
-    f << WideToUtf8(RecordToJson(rec).Dump()) << "\n";
+    OpRecord signedRec = rec;
+    auto secret = GetOrCreateMachineSecret();
+    if (!secret.empty()) {
+        // T-A1: sign at the single write point — every future record is
+        // verifiable; a standard user forging history.jsonl cannot.
+        signedRec.sig = HmacSha256Hex(secret, SignedFieldsOf(signedRec));
+    }
+    f << WideToUtf8(RecordToJson(signedRec).Dump()) << "\n";
     ++gen_;
+}
+
+bool OperationLog::VerifySignature(const OpRecord& rec) {
+    if (rec.sig.empty()) return false;   // legacy / unsigned
+    auto secret = GetOrCreateMachineSecret();
+    if (secret.empty()) return false;
+    return HmacSha256Hex(secret, SignedFieldsOf(rec)) == rec.sig;
+}
+
+// Admin-confirmed adoption of legacy records (upgrade path): re-sign the
+// unsigned ones whose quarantine target sits under a MiniSys.Quarantine
+// root. Returns how many were signed.
+size_t OperationLog::SignUnsignedLegacy() {
+    std::lock_guard<std::mutex> g(mu_);
+    auto secret = GetOrCreateMachineSecret();
+    if (secret.empty()) return 0;
+    std::vector<OpRecord> all = LoadAllLocked();
+    size_t n = 0;
+    for (auto& r : all) {
+        if (!r.sig.empty()) continue;
+        std::wstring t = ToLower(r.target);
+        // X:\MiniSys.Quarantine\… — structural check only; adoption is an
+        // explicit admin action so this is the trust anchor for old rows.
+        if (t.size() >= 21 && t[1] == L':' &&
+            t.compare(3, 17, L"minisys.quarantine") == 0) {
+            r.sig = HmacSha256Hex(secret, SignedFieldsOf(r));
+            ++n;
+        }
+    }
+    if (n > 0) {
+        RewriteAtomic(JsonlPath(), all);
+        gen_ += n;
+    }
+    return n;
 }
 
 void OperationLog::UpdateStatus(const std::wstring& id, OpStatus status,

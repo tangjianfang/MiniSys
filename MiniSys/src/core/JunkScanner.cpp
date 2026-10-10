@@ -62,16 +62,22 @@ bool PassesAgeFilter(const JunkRule& rule, const Candidate& c) {
 }
 
 std::vector<std::wstring> SplitNames(const std::wstring& s) {
+    // v2.14 (review-05 T-A12): spaces are PART of profile names — the old
+    // version dropped them, so the built-in "Code Cache" browser rule
+    // tokenized into "Code"+"Cache" and never matched anything.
     std::vector<std::wstring> out;
     std::wstring cur;
+    auto flush = [&] {
+        // trim ends
+        while (!cur.empty() && cur.front() == L' ') cur.erase(cur.begin());
+        while (!cur.empty() && cur.back() == L' ') cur.pop_back();
+        if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+    };
     for (wchar_t ch : s) {
-        if (ch == L';' || ch == L',') {
-            if (!cur.empty()) { out.push_back(cur); cur.clear(); }
-        } else if (ch != L' ') {
-            cur += ch;
-        }
+        if (ch == L';' || ch == L',') flush();
+        else cur += ch;
     }
-    if (!cur.empty()) out.push_back(cur);
+    flush();
     return out;
 }
 

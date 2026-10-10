@@ -3,8 +3,11 @@
 // elevated cleaner. Each case is a bypass ATTEMPT: it must be denied.
 #include "core/GuardRails.h"
 #include "core/JunkRules.h"
+#include "core/OperationLog.h"
 #include "core/PlanBuilder.h"
+#include "core/VolumeIndex.h"
 #include "platform/Junction.h"
+#include "platform/SecretStore.h"
 #include "util/PathUtils.h"
 #include "util/StringUtils.h"
 
@@ -222,6 +225,72 @@ TEST(DelegateWhitelist, BypassAttemptsDenied) {
     // empty / garbage
     EXPECT_FALSE(JunkRules::DelegateCommandAllowed(L"", why));
     EXPECT_FALSE(JunkRules::DelegateCommandAllowed(L"   ", why));
+}
+
+// ---- v2.14: signed records & guarded Finalize (review-05 T-A1/T-A3) ---------
+
+TEST(TrustChain, HmacContract) {
+    // Unelevated test processes cannot read the admin secret — the API
+    // degrades to "unsigned", which is itself the contract.
+    auto secret = GetOrCreateMachineSecret();
+    if (secret.empty()) {
+        EXPECT_TRUE(HmacSha256Hex(secret, L"x").empty());
+        return;
+    }
+    std::wstring a = HmacSha256Hex(secret, L"hello", 10);
+    std::wstring b = HmacSha256Hex(secret, L"hello", 10);
+    std::wstring c = HmacSha256Hex(secret, L"hellO", 10);
+    EXPECT_FALSE(a.empty());
+    EXPECT_EQ(a, b);       // deterministic
+    EXPECT_NE(a, c);       // input-sensitive
+    EXPECT_EQ(a.size(), 64u);   // SHA-256 hex
+    // Streaming == one-shot.
+    HmacSha256 h(secret);
+    h.Update("hel", 3);
+    h.Update("lo", 2);
+    auto mac = h.Finish();
+    std::wstring hex;
+    const wchar_t* digits = L"0123456789abcdef";
+    for (uint8_t byte : mac) { hex += digits[byte >> 4]; hex += digits[byte & 0xf]; }
+    EXPECT_EQ(hex, a);
+}
+
+TEST(TrustChain, UnsignedRecordsAreNotVerifiable_Unelevated) {
+    // In unelevated contexts records stay unsigned (secret unavailable);
+    // undo then refuses them — display-only by design.
+    OpRecord r;
+    r.id = OperationLog::NewId();
+    r.source = L"C:\\some\\file.txt";
+    r.target = L"C:\\MiniSys.Quarantine\\x";
+    r.status = OpStatus::Success;
+    OperationLog::Instance().Append(r);
+    auto recs = OperationLog::Instance().LoadAll();
+    ASSERT_FALSE(recs.empty());
+    bool found = false;
+    for (const auto& loaded : recs) {
+        if (loaded.id == r.id) { found = true; EXPECT_FALSE(loaded.sig.empty() == false); }
+    }
+    EXPECT_TRUE(found);
+    if (GetOrCreateMachineSecret().empty()) {
+        EXPECT_FALSE(OperationLog::VerifySignature(recs[0]));
+    }
+}
+
+TEST(TrustChain, FinalizeCycleGuardTerminates) {
+    // T-A3: a poisoned cache can encode an FRN cycle (A↔B). Finalize must
+    // abort via its budget instead of hanging (this test FAILS by timeout
+    // if the guard regresses).
+    auto& vi = VolumeIndex::Instance();
+    vi.ResetForTesting();
+    vi.AddNodeForTesting(1, 1, L"", true, 0);     // root
+    vi.AddNodeForTesting(2, 3, L"a", true, 0);    // A.parent = B
+    vi.AddNodeForTesting(3, 2, L"b", true, 0);    // B.parent = A  (cycle)
+    vi.FinalizeForTesting(L'Z');
+    size_t n = 0;
+    vi.Search(L"anything", false, 10,
+              [&](const VolumeIndex::SearchHit&) { ++n; return true; });
+    EXPECT_EQ(n, 0u);   // cycle → index rejected → no results
+    vi.ResetForTesting();
 }
 
 } // namespace minisys

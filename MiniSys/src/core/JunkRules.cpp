@@ -225,18 +225,62 @@ bool DelegateCommandAllowedImpl(const std::wstring& cmd, std::wstring& reason) {
 
 // Per-rule load-time validation (REVIEW P0-2 / 05-T-B3).
 bool ValidateRule(const JunkRule& r, std::wstring& why) {
-    if (r.strategy == CleanStrategy::Delegate) {
-        if (r.command.empty()) {
+    // v2.14 (review-05 T-A7): InfoOnly used to skip ALL path checks — a
+    // crafted rules.json could display "System32\cmd.exe 可清理" (social
+    // engineering; execution would be caught, display wasn't). Non-
+    // quarantine rules must now target EXACTLY a built-in rule's path:
+    // external rules can only mirror built-ins, never add protected
+    // targets. profileNames entries must be bare relative names (no
+    // drive/root escape via fs::path root replacement).
+    if (r.strategy != CleanStrategy::Quarantine) {
+        if (r.strategy == CleanStrategy::Delegate && r.command.empty()) {
             why = L"委派规则缺少 command";
             return false;
         }
-        return DelegateCommandAllowedImpl(r.command, why);
+        auto expanded = ExpandEnv(r.path);
+        std::wstring low = ToLower(expanded);
+        bool known = false;
+        for (const auto& b : BuiltinRules()) {
+            if (b.strategy != CleanStrategy::Quarantine &&
+                ToLower(ExpandEnv(b.path)) == low) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            why = L"非隔离策略的路径必须是内置规则路径（外置规则不可新增系统/组件目标）";
+            return false;
+        }
+        return r.strategy != CleanStrategy::Delegate ||
+               DelegateCommandAllowedImpl(r.command, why);
     }
-    if (r.strategy != CleanStrategy::Quarantine) return true;  // InfoOnly: display only
     auto expanded = ExpandEnv(r.path);
     if (expanded.empty()) {
         why = L"路径为空或环境变量展开失败";
         return false;
+    }
+    // v2.14 (T-A7): profileNames tokens must be bare names — absolute
+    // paths used to escape via fs::path root replacement on Windows.
+    {
+        std::vector<std::wstring> names;
+        std::wstring cur;
+        for (wchar_t ch : r.profileNames) {
+            if (ch == L';' || ch == L',') {
+                if (!cur.empty()) { names.push_back(cur); cur.clear(); }
+            } else {
+                cur += ch;
+            }
+        }
+        if (!cur.empty()) names.push_back(cur);
+        for (const auto& name : names) {
+            if (name.find(L':') != std::wstring::npos ||
+                name.find(L'\\') != std::wstring::npos ||
+                name.find(L'/') != std::wstring::npos ||
+                name.find(L"..") != std::wstring::npos) {
+                why = L"profileNames 含非法路径成分（只允许相对名称）";
+                return false;
+            }
+        }
     }
     // Quarantine rules may target user space or EXACTLY the built-in
     // exempted system cleanup roots — never new system-area subtrees.

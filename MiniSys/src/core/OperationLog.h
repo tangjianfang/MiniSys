@@ -39,6 +39,14 @@ public:
     // invalidate precisely instead of re-parsing per tick.
     uint64_t Generation();
 
+    // v2.14 (review-05 T-A1): record authenticity. New records are signed
+    // on Append with the admin-ACLed machine secret; VerifySignature fails
+    // for unsigned (legacy) or tampered records — undo refuses them.
+    static bool VerifySignature(const OpRecord& rec);
+    // Admin-confirmed adoption: re-sign unsigned legacy records whose
+    // quarantine target lies under a MiniSys.Quarantine root.
+    size_t SignUnsignedLegacy();
+
     // Generate a unique record id (timestamp + counter).
     static std::wstring NewId();
 

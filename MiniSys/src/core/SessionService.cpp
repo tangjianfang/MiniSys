@@ -922,7 +922,17 @@ bool SessionService::UndoRecordsAsync(const std::vector<OpRecord>& records) {
 }
 
 SessionService::UndoResult SessionService::UndoRecord(const OpRecord& rec,
-                                                       std::wstring& errOut) {    if (!rec.isReversible || rec.status != OpStatus::Success) {
+                                                       std::wstring& errOut) {
+    // v2.14 (review-05 T-A1, second layer): the execution choke point —
+    // unsigned/tampered records are never undone, even if a future caller
+    // forgets the pre-flight check.
+    if (!OperationLog::VerifySignature(rec)) {
+        MS_LOG_WARN(L"Undo refused: record without valid signature: %s",
+                    rec.id.c_str());
+        errOut = L"记录缺少有效签名（可能被篡改或为旧版记录），已拒绝还原";
+        return UndoResult::NotReversible;
+    }
+    if (!rec.isReversible || rec.status != OpStatus::Success) {
         return UndoResult::NotReversible;
     }
     if (rec.type == OpType::Quarantine) {

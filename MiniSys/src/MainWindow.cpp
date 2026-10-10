@@ -5,6 +5,7 @@
 #include "core/DeleteOp.h"
 #include "core/GuardRails.h"
 #include "core/JunkRules.h"
+#include "core/OperationLog.h"
 #include "core/PlanBuilder.h"
 #include "core/SessionService.h"
 #include "core/VolumeIndex.h"
@@ -791,6 +792,20 @@ void MainWindow::OnCommandPalette() {
     add(L"清空隔离区…", [this] { OnEmptyQuarantine(); });
     add(L"关于 MiniSys", [this] { OnAbout(); });
     add(L"设置开发缓存扫描根…", [this] { OnDevCacheRoots(); });
+    add(L"信任并签名旧操作记录…", [this] {
+        // v2.14 (T-A1): upgrade path — legacy unsigned records are undo-
+        // blocked by default; the admin explicitly adopts the ones whose
+        // quarantine target sits under a MiniSys.Quarantine root.
+        if (dialogs::ConfirmTask(hwnd_, L"信任旧记录",
+                L"为升级前的旧操作记录补加防伪签名？",
+                L"仅会对隔离区目标位于 MiniSys.Quarantine 目录下的旧记录签名；"
+                L"签名后这些记录恢复可撤销。请确认这些记录确实由本工具生成。",
+                /*warning=*/true, L"信任并签名")) {
+            size_t n = OperationLog::Instance().SignUnsignedLegacy();
+            ShowHint(n ? FormatW(L"✓ 已为 %zu 条旧记录签名，恢复可撤销。", n)
+                       : L"ℹ 没有可签名的旧记录。");
+        }
+    });
 
     struct TabCmd { const wchar_t* name; TabId tab; };
     static const TabCmd kTabs[] = {
@@ -1787,7 +1802,12 @@ void MainWindow::OnOpenLocation() {
     size_t idx = static_cast<size_t>(lvi.lParam);
     if (idx >= items.size()) return;
     auto path = items[idx].path;
-    std::wstring args = L"/select,\"" + path.wstring() + L"\"";
+    // v2.14 (review-05 T-A8): a quote in the path breaks out of the
+    // "/select,"…" argument — strip quotes (a tampered cache can put
+    // anything in there) so explorer receives one well-formed token.
+    std::wstring clean = path.wstring();
+    clean.erase(std::remove(clean.begin(), clean.end(), L'"'), clean.end());
+    std::wstring args = L"/select,\"" + clean + L"\"";
     ShellExecuteW(hwnd_, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
 }
 

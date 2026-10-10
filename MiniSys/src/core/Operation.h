@@ -27,6 +27,10 @@ struct OpRecord {
     unsigned long long sizeBytes = 0;
     std::wstring note;          // any extra context, error message, etc.
     bool isReversible = true;
+    // review-05 T-A1 fix (v2.14): HMAC-SHA256 over the record fields with
+    // the admin-ACLed machine secret. Empty = legacy (unsigned) record —
+    // display-only, undo forbidden until explicitly trusted & signed.
+    std::wstring sig;
 };
 
 // Abstract operation — each instance describes one unit of work and supports Undo.
