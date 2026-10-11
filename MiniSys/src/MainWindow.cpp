@@ -299,6 +299,53 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                         return CDRF_DODEFAULT;
                     }
                 }
+            } else if (nm->hwndFrom == h_.list &&
+                       nm->code == LVN_GETDISPINFO) {
+                // v2.15: virtual list — the active presenter supplies cells.
+                // L-1 (round-5 07, CONFIRMED catastrophic): this branch
+                // failed to apply via a scripted edit and every list page
+                // rendered EMPTY while counts stayed non-zero. Applied with
+                // the Edit tool and verified by grep.
+                auto* di = reinterpret_cast<NMLVDISPINFOW*>(lp);
+                if (auto* p = ActivePresenter()) {
+                    if (!p->SupplyDispInfo(di)) di->item.mask = 0;
+                } else {
+                    di->item.mask = 0;
+                }
+            } else if (nm->hwndFrom == h_.list &&
+                       nm->code == LVN_GETEMPTYMARKUP) {
+                // V-A2: an empty page says WHY it's empty.
+                auto* em = reinterpret_cast<NMLVEMPTYMARKUP*>(lp);
+                switch (CurrentTab()) {
+                    case TabId::Search:
+                        wcscpy_s(em->szMarkup,
+                                 L"输入关键词或点「快速筛选」开始搜索（Ctrl+K 命令面板）");
+                        break;
+                    case TabId::History:
+                        wcscpy_s(em->szMarkup,
+                                 L"暂无操作记录——清理或迁移后会显示在这里");
+                        break;
+                    default:
+                        wcscpy_s(em->szMarkup, L"列表为空——点「扫描」查看可清理项");
+                        break;
+                }
+                em->dwFlags = EMF_CENTERED;
+                return TRUE;
+            } else if (nm->hwndFrom == h_.list && nm->code == NM_CLICK) {
+                // v2.15: virtual checkbox semantics — toggle on state-icon
+                // click (owner-data lists don't store state themselves).
+                DWORD posClick = GetMessagePos();
+                POINT ptClick{ GET_X_LPARAM(posClick), GET_Y_LPARAM(posClick) };
+                ScreenToClient(h_.list, &ptClick);
+                LVHITTESTINFO ht{}; ht.pt = ptClick;
+                int row = ListView_SubItemHitTest(h_.list, &ht);
+                if (row >= 0 && (ht.flags & LVHT_ONITEMSTATEICON)) {
+                    if (auto* lp3 =
+                            dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+                        lp3->ToggleCheckAt(row);
+                        UpdateExecButton();
+                    }
+                }
             } else if (nm->hwndFrom == h_.list && nm->code == LVN_COLUMNCLICK) {
                 auto nmlv = reinterpret_cast<LPNMLISTVIEW>(lp);
                 if (auto* p = ActivePresenter()) p->OnColumnClick(nmlv->iSubItem);

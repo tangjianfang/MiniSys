@@ -204,14 +204,19 @@ bool DelegateCommandAllowedImpl(const std::wstring& cmd, std::wstring& reason) {
             // boundary — "/Cleanup-Image\ncmd /c calc" used to pass as a
             // prefix of "/Online /Cleanup-Image". A prefix that itself ends
             // in whitespace ("/h ") already consumed its separator.
-            bool atBoundary = p.empty() || p.back() == L' ' || p.back() == L'\t' ||
-                              argsLow.size() == p.size() ||
-                              argsLow[p.size()] == L' ' ||
-                              argsLow[p.size()] == L'\t';
-            bool ok = p.empty() ? argsLow.empty()
-                                : (argsLow.size() >= p.size() &&
-                                   argsLow.compare(0, p.size(), p) == 0 &&
-                                   atBoundary);
+            // L-7 (round-5): the OLD form evaluated argsLow[p.size()]
+            // eagerly even when the prefix didn't match — an out-of-range
+            // assert under MSVC debug iterators (latent since v2.12; test
+            // binaries only ever ran Release).
+            bool prefixOk = !p.empty() && argsLow.size() >= p.size() &&
+                            argsLow.compare(0, p.size(), p) == 0;
+            bool atBoundary =
+                !prefixOk ||
+                p.back() == L' ' || p.back() == L'\t' ||
+                argsLow.size() == p.size() ||
+                argsLow[p.size()] == L' ' ||
+                argsLow[p.size()] == L'\t';
+            bool ok = p.empty() ? argsLow.empty() : (prefixOk && atBoundary);
             if (ok) {
                 return true;
             }
