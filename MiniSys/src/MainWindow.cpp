@@ -509,6 +509,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (probeStage_ == 0 && !probeQuery_.empty() &&
                 VolumeIndex::AnyValid()) {
                 probeStage_ = 1;
+                MS_LOG_INFO(L"PROBE: starting search phase");
                 SetWindowTextW(h_.editSearch, probeQuery_.c_str());
                 RunSearch();
             }
@@ -550,11 +551,30 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                         presenters_[static_cast<size_t>(TabId::Search)].get())) {
                     cells = sp->CellCountForProbe();
                 }
+                // Probe numbers go to the LOG too — the popup can be
+                // dismissed before anyone reads it.
+                MS_LOG_INFO(
+                    L"PROBE: total=%zu vols=%zu hits=%zu rows=%zu cells=%zu "
+                    L"rawPdb=%zu rawE=%zu sample0='%s' sample5='%s' "
+                    L"pass1=%zd firstPath='%s'",
+                    VolumeIndex::TotalEntries(), VolumeIndex::ValidVolumeCount(),
+                    rows, rows, cells,
+                    VolumeIndex::For(L'C').DebugNameMatchCount(L"pdb"),
+                    VolumeIndex::For(L'C').DebugNameMatchCount(L"e"),
+                    VolumeIndex::For(L'C').DebugNameSample(0).c_str(),
+                    VolumeIndex::For(L'C').DebugNameSample(5).c_str(),
+                    static_cast<ptrdiff_t>(
+                        VolumeIndex::For(L'C').DebugSearchPass1(L"pdb", false)),
+                    VolumeIndex::For(L'C').DebugFirstPath(L"pdb").c_str());
                 MessageBoxW(hwnd_,
-                    FormatW(L"自检结果：\n索引条目 %s（%zu 个磁盘）\n查询“%s”命中 %zu 项\n快照行数 %zu\n渲染缓存 %zu 格\n\n若命中>0 且快照=0 或渲染=0，则显示层有 Bug；\n若命中=0，则搜索逻辑有 Bug。",
+                    FormatW(L"自检结果：\n索引条目 %s（%zu 个磁盘）\n查询“%s”命中 %zu 项\n快照行数 %zu\n渲染缓存 %zu 格\n\n原始名池含“pdb”：%zu 项；含“e”：%zu 项\n样本名：%s | %s\n\n原始>0 且命中=0 → Search 内部 Bug；原始=0 → 索引名池 Bug。",
                             FormatCount(VolumeIndex::TotalEntries()).c_str(),
                             VolumeIndex::ValidVolumeCount(),
-                            probeQuery_.c_str(), rows, rows, cells).c_str(),
+                            probeQuery_.c_str(), rows, rows, cells,
+                            VolumeIndex::For(L'C').DebugNameMatchCount(L"pdb"),
+                            VolumeIndex::For(L'C').DebugNameMatchCount(L"e"),
+                            VolumeIndex::For(L'C').DebugNameSample(0).c_str(),
+                            VolumeIndex::For(L'C').DebugNameSample(5).c_str()).c_str(),
                     L"MiniSys 自检", MB_OK | MB_ICONINFORMATION);
                 probeStage_ = 2;
             }
@@ -1411,6 +1431,9 @@ void MainWindow::UpdateSearchStatus() {
 }
 
 void MainWindow::OnScanDone() {
+    MS_LOG_INFO(L"OnScanDone: tab=%d probe=%d stage=%d q='%s'",
+                static_cast<int>(CurrentTab()), probeQuery_.empty() ? 0 : 1,
+                probeStage_, probeQuery_.c_str());
     auto& svc = SessionService::Instance();
     SetTaskBusy(TaskMode::None);
 
@@ -1564,6 +1587,7 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
 // in-flight search is cancelled and retried via a short timer; other busy
 // tasks simply defer the retry.
 void MainWindow::RunSearch() {
+    MS_LOG_INFO(L"RunSearch: tab=%d", static_cast<int>(CurrentTab()));
     auto* sp = dynamic_cast<SearchPresenter*>(ActivePresenter());
     if (!sp) return;
     auto& svc = SessionService::Instance();

@@ -1370,4 +1370,56 @@ bool VolumeIndex::CollectChildren(const std::wstring& dirPath,
     return true;
 }
 
+size_t VolumeIndex::DebugSearchPass1(const std::wstring& query, bool matchPath) const {
+    if (!ready_) return static_cast<size_t>(-1);   // ready_ gate failed!
+    auto terms = SplitQuery(query);
+    size_t c = 0;
+    for (uint32_t i = 0; i < nodes_.size() && c < 1000; ++i) {
+        const Node& n = nodes_[i];
+        if (n.frn == 0 || n.parentFrn == n.frn) continue;
+        std::wstring_view name(names_.data() + n.nameOff, n.nameLen);
+        bool ok = true;
+        for (const auto& term : terms) {
+            ok = HasWildcard(term) ? JunkRules::MatchWildcard(term, std::wstring(name))
+                                   : IFindView(name, term);
+            if (!ok && matchPath) ok = false;   // path variant unused in probe
+            if (!ok) break;
+        }
+        if (ok) ++c;
+    }
+    return c;
+}
+
+std::wstring VolumeIndex::DebugFirstPath(const std::wstring& query) const {
+    for (uint32_t i = 0; i < nodes_.size(); ++i) {
+        const Node& n = nodes_[i];
+        if (n.frn == 0 || n.parentFrn == n.frn) continue;
+        std::wstring_view name(names_.data() + n.nameOff, n.nameLen);
+        if (IFindView(name, query)) return OriginalCasePathOf(n);
+    }
+    return L"<no-pass1-hit>";
+}
+
+size_t VolumeIndex::DebugNameMatchCount(const std::wstring& sub) const {
+    size_t c = 0;
+    for (const auto& n : nodes_) {
+        if (n.frn == 0) continue;
+        std::wstring_view name(names_.data() + n.nameOff, n.nameLen);
+        if (IFindView(name, sub)) ++c;
+    }
+    return c;
+}
+
+std::wstring VolumeIndex::DebugNameSample(size_t nth) const {
+    size_t seen = 0;
+    for (const auto& n : nodes_) {
+        if (n.frn == 0 || n.nameLen == 0) continue;
+        if (seen++ == nth) {
+            return std::wstring(names_.data() + n.nameOff, n.nameLen);
+        }
+    }
+    return L"<none>";
+}
+
+
 } // namespace minisys

@@ -35,6 +35,15 @@ public:
     // Valid volume instances for merged searches (worker-only; snapshot).
     static std::vector<VolumeIndex*> ValidVolumes();
 
+    // -probe diagnostics: raw substring count over the NAME POOL, bypassing
+    // Search entirely (pass-1/pass-2 localization), plus a name sample.
+    size_t DebugNameMatchCount(const std::wstring& sub) const;
+    std::wstring DebugNameSample(size_t nth) const;
+    // -probe: pass-1 match count (Search's node scan WITHOUT pass-2 path
+    // reconstruction) and the first raw path built by pass-2.
+    size_t DebugSearchPass1(const std::wstring& query, bool matchPath) const;
+    std::wstring DebugFirstPath(const std::wstring& query) const;
+
     struct FileEntry {
         std::wstring path;        // full path
         uint64_t     lastWrite = 0;   // FILETIME

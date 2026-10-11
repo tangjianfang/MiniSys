@@ -493,6 +493,8 @@ bool SessionService::IdleMaintenanceAsync() {
 }
 
 bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
+    MS_LOG_INFO(L"SearchAsync enter: busy=%d query='%s'",
+                IsBusy() ? 1 : 0, query.c_str());
     if (IsBusy()) return false;
     SetProgress(query.empty() ? L"搜索" : L"搜索: " + query);
     HWND hwnd = hwnd_;
@@ -564,6 +566,7 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
                       FormatCountSimple(
                           Results(TabId::Search).size()).c_str(),
                       FormatCountSimple(total).c_str()));
+        MS_LOG_INFO(L"Search worker body done: hits=%zu", Results(TabId::Search).size());
         MS_LOG_INFO(L"Search done: query='%s' hits=%zu indexTotal=%zu",
                     query.c_str(), Results(TabId::Search).size(), total);
         Post(hwnd, WM_APP_SEARCH_DONE);
