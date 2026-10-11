@@ -49,3 +49,12 @@ echo [OK] Build succeeded.
 echo Output: %~dp0build\%CONFIG%\MiniSys.exe
 echo.
 endlocal
+
+REM v2.16: canonical deployment — build\Latest is THE exe users run.
+REM Rebuilds land there automatically so "which exe is current" has one answer.
+if exist "%~dp0build\%CONFIG%\MiniSys.exe" (
+    if not exist "%~dp0build\Latest" mkdir "%~dp0build\Latest"
+    copy /Y "%~dp0build\%CONFIG%\MiniSys.exe" "%~dp0build\Latest\MiniSys.exe" >nul
+    if exist "%~dp0build\%CONFIG%\rules.json" copy /Y "%~dp0build\%CONFIG%\rules.json" "%~dp0build\Latest\rules.json" >nul
+    echo [Latest] deployed to build\Latest\MiniSys.exe
+)
