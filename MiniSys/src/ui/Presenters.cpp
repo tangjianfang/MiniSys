@@ -246,7 +246,12 @@ void SetListColumns(HWND list,
     for (size_t i = 0; i < cols.size(); ++i) {
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-        col.fmt = LVCFMT_LEFT;
+        // V-A1 (aesthetics): numeric columns right-align — sizes could not
+        // be compared positionally when left-aligned.
+        col.fmt = (wcscmp(cols[i].first, L"大小") == 0 ||
+                   wcscmp(cols[i].first, L"修改时间") == 0)
+                      ? LVCFMT_RIGHT
+                      : LVCFMT_LEFT;
         col.pszText = const_cast<LPWSTR>(cols[i].first);
         col.cx = UiScale(list, cols[i].second);
         if (static_cast<int>(i) < existing) {
@@ -876,12 +881,12 @@ std::wstring HistoryPresenter::HistoryTypeLabel(const OpRecord& r) {
 std::wstring HistoryPresenter::HistoryRiskLabel(const OpRecord& r) {
     // X-27a (round-4 07): unsigned records still advertised "🛡 可还原" —
     // undo refuses them; the column must say so.
-    if (!OperationLog::VerifySignature(r)) return L"⧗ 未签名";
+    if (!OperationLog::VerifySignature(r)) return L"未签名";
     if (r.status == OpStatus::Failed ||
-        r.status == OpStatus::Interrupted) return L"× 需关注";
-    if (r.type == OpType::EmptyRecycleBin) return L"⚠ 不可逆";
-    if (!r.isReversible) return L"⚠ 不可逆";
-    return L"🛡 可还原";
+        r.status == OpStatus::Interrupted) return L"需关注";
+    if (r.type == OpType::EmptyRecycleBin) return L"不可逆";
+    if (!r.isReversible) return L"不可逆";
+    return L"可还原";
 }
 
 void HistoryPresenter::UndoSelected() {

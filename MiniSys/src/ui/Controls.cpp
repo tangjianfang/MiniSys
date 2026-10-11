@@ -34,6 +34,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     col.fmt = LVCFMT_LEFT;
     auto AddCol = [&](int idx, int width, const wchar_t* title) {
         col.cx = UiScale(parent, width); col.pszText = const_cast<LPWSTR>(title);
+        col.fmt = (wcscmp(title, L"大小") == 0) ? LVCFMT_RIGHT : LVCFMT_LEFT;
         ListView_InsertColumn(h.list, idx, &col);
     };
     // v2.2 (REVIEW P0-6 / 07-X2): dedicated risk column — the risk level
@@ -48,8 +49,9 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.scan = CreateWindowExW(0, L"BUTTON", L"扫描",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_SCAN), inst, nullptr);
+    // V-A6 (aesthetics): the PRIMARY action gets the default-button weight.
     h.exec = CreateWindowExW(0, L"BUTTON", L"执行选中操作",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_EXECUTE), inst, nullptr);
     h.undo = CreateWindowExW(0, L"BUTTON", L"撤销选中(历史)",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,

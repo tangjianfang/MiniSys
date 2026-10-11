@@ -600,7 +600,9 @@ void MainWindow::OnCreate() {
     SetStockButtonIcon(h_.emptyQ,    SIID_RECYCLERFULL); // 清空隔离区 = 回收站
     SetStockButtonIcon(h_.open,      SIID_FOLDEROPEN);   // 打开位置 = 打开的文件夹
     SetStockButtonIcon(h_.targetBtn, SIID_DRIVEFIXED);   // 迁移目标 = 硬盘
-    SetStockButtonIcon(h_.about,     SIID_HELP);         // 关于 = 问号
+    // V-A8: the About button keeps NO icon — the saturated blue question
+    // mark was the only stable saturated color on screen and stole
+    // attention from semantic colors.
 
     // v2.9: restore persisted state FIRST (it re-selects the last active
     // tab and refills the search box), so the initial tab change renders
@@ -1444,6 +1446,18 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     bool searchTab = (CurrentTab() == TabId::Search);
     SetWindowTextW(h_.scan, scanning ? L"取消"
                                      : (searchTab ? L"重建索引" : L"扫描"));
+    // V-A7 (aesthetics): a window-level busy state — the title carries it
+    // even when the status pane is off-screen.
+    {
+        const wchar_t* base = L"MiniSys — 磁盘瘦身助手 " MINISYS_VERSION_TITLE;
+        std::wstring title = base;
+        if (mode == TaskMode::Scanning || mode == TaskMode::Indexing) {
+            title = L"⟳ 扫描中 — " + title;
+        } else if (mode == TaskMode::Executing) {
+            title = L"⚙ 执行中 — " + title;
+        }
+        SetWindowTextW(hwnd_, title.c_str());
+    }
     // v2.5 (L-22, live-confirmed): while the button means CANCEL it must not
     // keep the magnifying-glass icon — swap to the red ✕ (this SDK has no
     // SIID_STOP; SIID_DELETE's glyph is the standard cancel cross) and back.
