@@ -1888,10 +1888,9 @@ void MainWindow::OnOpenLocation() {
     auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter());
     if (!lp) return;
     const auto& items = lp->Snapshot();
-    LVITEMW lvi{}; lvi.iItem = sel; lvi.mask = LVIF_PARAM;
-    ListView_GetItem(h_.list, &lvi);
-    size_t idx = static_cast<size_t>(lvi.lParam);
-    if (idx >= items.size()) return;
+    // L-3: virtual mode — the selected row IS the snapshot index.
+    if (sel < 0 || static_cast<size_t>(sel) >= items.size()) return;
+    size_t idx = static_cast<size_t>(sel);
     auto path = items[idx].path;
     // v2.14 (review-05 T-A8): a quote in the path breaks out of the
     // "/select,"…" argument — strip quotes (a tampered cache can put

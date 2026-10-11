@@ -124,11 +124,12 @@ void ListTabPresenter::RestoreViewState() {
 }
 
 const ScanItem* ListTabPresenter::ItemAtRow(int row) const {
-    if (row < 0) return nullptr;
-    LVITEMW lvi{}; lvi.iItem = row; lvi.mask = LVIF_PARAM;
-    if (!ListView_GetItem(ui_.list, &lvi)) return nullptr;
-    size_t idx = static_cast<size_t>(lvi.lParam);
-    return idx < snapshot_.size() ? &snapshot_[idx] : nullptr;
+    // L-3 (round-5 07): virtual mode — rows map 1:1 onto snapshot_ (sorting
+    // permutes the SNAPSHOT, not the rows), and LVIF_PARAM is meaningless
+    // under LVS_OWNERDATA; the old lParam indirection could fetch the wrong
+    // item for the double-click info panel and the row tints.
+    if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return nullptr;
+    return &snapshot_[static_cast<size_t>(row)];
 }
 
 void ListTabPresenter::RenderItems() {
