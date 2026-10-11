@@ -75,6 +75,8 @@ private:
     int  idleCountdown_ = 0;                  // v2.10 (X-10): rescan grace
     DWORD idleArmInput_ = 0;                  // v2.10 (X-10): cancel on input
     bool tourMode_ = false;                   // v2.13c: -tour visual-review walk
+    std::wstring probeQuery_;                 // v2.16b: -probe <q> self-test
+    int  probeStage_ = 0;                     // 0=wait index,1=wait search
     ULONGLONG lastIdleMaintTick_ = 0;         // B-3: idle-maintenance cooldown
     void OnIdleCheck();                       // v2.5: idle background rescan
     std::wstring ComposeScanTimeLine() const; // v2.5: "上次扫描: …" per tab

@@ -166,6 +166,7 @@ public:
     void SetQuery(const std::wstring& text, bool matchPath);
 
     const std::wstring& Query() const { return query_; }
+    size_t CellCountForProbe() const { return cells_.size(); }   // -probe
     bool MatchPath() const { return matchPath_; }
     size_t TotalIndexed() const;
 

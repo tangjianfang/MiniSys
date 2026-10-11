@@ -506,6 +506,12 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             // review-04 R-4: drop stale completions from superseded tasks.
             if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnScanDone();
+            if (probeStage_ == 0 && !probeQuery_.empty() &&
+                VolumeIndex::AnyValid()) {
+                probeStage_ = 1;
+                SetWindowTextW(h_.editSearch, probeQuery_.c_str());
+                RunSearch();
+            }
             return 0;
         case WM_APP_TASK_STARTED:
             // An ExecutePlan launched outside OnExecute (folder-tree right
@@ -532,6 +538,26 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 UpdateSearchStatus();
             }
             UpdateStatusBar();
+            if (probeStage_ == 1) {
+                // -probe self-test: report where the chain actually got.
+                size_t rows = 0;
+                if (auto* lp3 = dynamic_cast<ListTabPresenter*>(
+                        presenters_[static_cast<size_t>(TabId::Search)].get())) {
+                    rows = lp3->Snapshot().size();
+                }
+                size_t cells = 0;
+                if (auto* sp = dynamic_cast<SearchPresenter*>(
+                        presenters_[static_cast<size_t>(TabId::Search)].get())) {
+                    cells = sp->CellCountForProbe();
+                }
+                MessageBoxW(hwnd_,
+                    FormatW(L"自检结果：\n索引条目 %s（%zu 个磁盘）\n查询“%s”命中 %zu 项\n快照行数 %zu\n渲染缓存 %zu 格\n\n若命中>0 且快照=0 或渲染=0，则显示层有 Bug；\n若命中=0，则搜索逻辑有 Bug。",
+                            FormatCount(VolumeIndex::TotalEntries()).c_str(),
+                            VolumeIndex::ValidVolumeCount(),
+                            probeQuery_.c_str(), rows, rows, cells).c_str(),
+                    L"MiniSys 自检", MB_OK | MB_ICONINFORMATION);
+                probeStage_ = 2;
+            }
             return 0;
         case WM_APP_VERIFY_DONE:
             if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
@@ -680,6 +706,10 @@ void MainWindow::OnCreate() {
                 if (_wcsicmp(argv[i], L"-tour") == 0) {
                     tourMode_ = true;
                     SetTimer(hwnd_, TIMER_TOUR, 4000, nullptr);
+                }
+                if (_wcsicmp(argv[i], L"-probe") == 0 && i + 1 < argc) {
+                    probeQuery_ = argv[i + 1];
+                    ++i;
                 }
             }
             LocalFree(argv);

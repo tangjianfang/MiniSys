@@ -564,6 +564,8 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
                       FormatCountSimple(
                           Results(TabId::Search).size()).c_str(),
                       FormatCountSimple(total).c_str()));
+        MS_LOG_INFO(L"Search done: query='%s' hits=%zu indexTotal=%zu",
+                    query.c_str(), Results(TabId::Search).size(), total);
         Post(hwnd, WM_APP_SEARCH_DONE);
     });
     return true;
