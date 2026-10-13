@@ -97,6 +97,71 @@ std::wstring FormatAge(uint64_t filetime) {
     return buf;
 }
 
+// v2.19 (user image #8): bold variant of a control's UI font, created
+// once per process (the UI font never changes after CreateControls).
+HFONT BoldUiFont(HWND ctl) {
+    static HFONT bold = [ctl]() -> HFONT {
+        HFONT base = reinterpret_cast<HFONT>(
+            SendMessageW(ctl, WM_GETFONT, 0, 0));
+        if (!base) return nullptr;
+        LOGFONTW lf{};
+        if (GetObjectW(base, sizeof(lf), &lf) == 0) return nullptr;
+        lf.lfWeight = FW_BOLD;
+        return CreateFontIndirectW(&lf);
+    }();
+    return bold;
+}
+
+// v2.19 (user image #8 “UI上的文本没有排版”): owner-draw for the info
+// strip (IDC_LABEL_INFO). Typography a plain STATIC cannot do: the first
+// (summary) line bold + near-black, hint lines grey, ⚠-prefixed warning
+// lines amber, and actual spacing between logical lines.
+void DrawInfoText(const DRAWITEMSTRUCT& dis) {
+    wchar_t buf[2048] = {};
+    int len = GetWindowTextW(dis.hwndItem, buf, 2048);
+    if (len <= 0) return;
+    std::wstring text(buf, static_cast<size_t>(len));
+
+    HDC dc = dis.hDC;
+    RECT rc = dis.rcItem;
+    rc.left += 2;
+    rc.top += 1;
+    rc.right -= 2;
+
+    SetBkMode(dc, TRANSPARENT);
+    HFONT base = reinterpret_cast<HFONT>(
+        SendMessageW(dis.hwndItem, WM_GETFONT, 0, 0));
+    HFONT bold = BoldUiFont(dis.hwndItem);
+    HGDIOBJ oldFont = base ? SelectObject(dc, base) : nullptr;
+
+    size_t pos = 0;
+    bool first = true;
+    while (pos < text.size() && rc.top < dis.rcItem.bottom) {
+        size_t nl = text.find(L'\n', pos);
+        std::wstring line =
+            text.substr(pos, nl == std::wstring::npos
+                                 ? std::wstring::npos : nl - pos);
+        pos = (nl == std::wstring::npos) ? text.size() : nl + 1;
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (!line.empty()) {
+            bool warn = line[0] == L'⚠' || line[0] == L'❗';
+            if (first && bold) SelectObject(dc, bold);
+            else if (base) SelectObject(dc, base);
+            SetTextColor(dc, first ? RGB(0x1A, 0x1A, 0x1A)
+                         : warn ? RGB(0xB2, 0x50, 0x00)
+                                : RGB(0x5A, 0x5A, 0x5A));
+            RECT lineRc = rc;
+            int h = DrawTextW(dc, line.c_str(), -1, &lineRc,
+                              DT_LEFT | DT_WORDBREAK | DT_NOPREFIX |
+                                  DT_EDITCONTROL);
+            rc.top += (h > 0 ? h : UiScale(dis.hwndItem, 15)) +
+                      UiScale(dis.hwndItem, 2);
+        }
+        first = false;
+    }
+    if (oldFont) SelectObject(dc, oldFont);
+}
+
 } // namespace
 
 bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
@@ -235,10 +300,37 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             mmi->ptMinTrackSize.y = UiScale(hwnd_, 560);
             return 0;
         }
+        case WM_DRAWITEM: {
+            // v2.19 (user image #8): the info strip is owner-drawn —
+            // DrawInfoText provides the typography (see above).
+            auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
+            if (dis->CtlType == ODT_STATIC && dis->CtlID == IDC_LABEL_INFO) {
+                DrawInfoText(*dis);
+                return TRUE;
+            }
+            break;
+        }
         case WM_NOTIFY: {
             auto nm = reinterpret_cast<LPNMHDR>(lp);
             if (nm->hwndFrom == h_.tab && nm->code == TCN_SELCHANGE) {
                 OnTabChanged();
+            } else if (nm->hwndFrom == h_.tab && nm->code == NM_CUSTOMDRAW) {
+                // v2.19 (user image #8 “选择 table 标签之后很不明显”): the
+                // selected tab was visually identical to its neighbours.
+                // Classic recipe: swap in a BOLD font for the selected item
+                // at ITEMPREPAINT (+ the wider TCM_SETPADDING set in
+                // CreateControls so the bold text doesn't clip).
+                auto* cd = reinterpret_cast<LPNMCUSTOMDRAW>(lp);
+                if (cd->dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (cd->dwDrawStage == CDDS_ITEMPREPAINT &&
+                    (cd->uItemState & CDIS_SELECTED)) {
+                    HFONT bold = BoldUiFont(h_.tab);
+                    if (bold) SelectObject(cd->hdc, bold);
+                    return CDRF_NEWFONT;
+                }
+                return CDRF_DODEFAULT;
             } else if (nm->hwndFrom == h_.list &&
                        nm->code == LVN_ITEMCHANGED &&
                        taskMode_ == TaskMode::None) {

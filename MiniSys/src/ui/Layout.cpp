@@ -132,7 +132,11 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
                       DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
             SelectObject(dc, old);
             ReleaseDC(ui.main, dc);
-            int lineH = Scale(15, dpi);
+            // v2.19 (user image #8): 17px/line — the owner-drawn info strip
+            // (MainWindow DrawInfoText) adds 2px spacing between logical
+            // lines on top of the ~15px text height; the old 15px slot
+            // clipped the last line's breathing room.
+            int lineH = Scale(17, dpi);
             int lines = (rc.bottom + lineH - 1) / lineH;
             if (lines < 1) lines = 1;
             if (lines > 6) lines = 6;   // cap — extremely long hints fold

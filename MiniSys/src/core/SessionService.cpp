@@ -17,6 +17,7 @@
 
 #include <windows.h>
 #include <objbase.h>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -506,7 +508,6 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
             std::wstring freeQuery;
             auto filter = VolumeIndex::ParseFilterTerms(query, freeQuery);
             constexpr size_t kMaxResults = 1000;
-            constexpr size_t kSizeFetchRows = 150;
             items.reserve(256);
             // v2.11 (磁盘瘦身助手): merged search over EVERY indexed
             // volume, one shared result budget.
@@ -530,17 +531,40 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
                 vi->Search(freeQuery, matchPath, kMaxResults - items.size(),
                            sink, filter);
             }
-            // Lazy size fetch for the top rows (ADR-004: the index carries
-            // no sizes). Cancellation checked per row.
-            WIN32_FILE_ATTRIBUTE_DATA fad{};
-            for (size_t i = 0; i < items.size() && i < kSizeFetchRows; ++i) {
-                if (cancelScan_.load()) break;
-                if (GetFileAttributesExW(LongPath(items[i].path).c_str(),
-                                         GetFileExInfoStandard, &fad)) {
-                    items[i].sizeBytes =
-                        (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
-                        static_cast<unsigned long long>(fad.nFileSizeLow);
+            // v2.19 (user 2026-10-14, image #9 “还是有些文件的大小没有
+            // 显示”): the size fetch used to cover only the first 150 rows —
+            // everything below row 150 rendered “—” forever. ADR-004 (the
+            // index carries no sizes) still holds, but the attribute-only
+            // fetch now covers EVERY row on a small parallel pool, so a
+            // full 1000-row page completes in tens of milliseconds.
+            {
+                const size_t n = items.size();
+                std::atomic<size_t> cursor{0};
+                unsigned hw = std::thread::hardware_concurrency();
+                if (hw == 0) hw = 4;
+                int pool = static_cast<int>(hw);
+                if (pool > 6) pool = 6;
+                if (n < 64) pool = 1;   // don't spawn for tiny pages
+                auto fetch = [&] {
+                    for (;;) {
+                        size_t i = cursor.fetch_add(1);
+                        if (i >= n || cancelScan_.load()) return;
+                        WIN32_FILE_ATTRIBUTE_DATA fad{};
+                        if (GetFileAttributesExW(LongPath(items[i].path).c_str(),
+                                                 GetFileExInfoStandard, &fad)) {
+                            items[i].sizeBytes =
+                                (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) |
+                                static_cast<unsigned long long>(fad.nFileSizeLow);
+                        }
+                    }
+                };
+                std::vector<std::thread> workers;
+                if (pool > 1) {
+                    workers.reserve(pool - 1);
+                    for (int t = 1; t < pool; ++t) workers.emplace_back(fetch);
                 }
+                fetch();   // this thread is worker #0
+                for (auto& t : workers) t.join();
             }
         }
         size_t total = VolumeIndex::TotalEntries();

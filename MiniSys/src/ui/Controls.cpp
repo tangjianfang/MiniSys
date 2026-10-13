@@ -14,6 +14,10 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_TABCTRL), inst, nullptr);
+    // v2.19 (user image #8): wider item padding so the BOLD selected-tab
+    // text (NM_CUSTOMDRAW in MainWindow) doesn't clip against its
+    // neighbour — the default 6px was cut for the bold advance width.
+    SendMessageW(h.tab, TCM_SETPADDING, 0, MAKELPARAM(UiScale(parent, 11), 3));
 
     // review-07 X-1: WS_TABSTOP on the list/tree (and the settings edits
     // below) — Tab used to cycle only the buttons, the 1000-row result
@@ -68,8 +72,11 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.advancedChk = CreateWindowExW(0, L"BUTTON", L"高级模式(Symlink)",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_CHK_ADVANCED), inst, nullptr);
+    // v2.19 (user image #8 “UI上的文本没有排版”): owner-drawn — MainWindow's
+    // WM_DRAWITEM handler gives the strip real typography (bold summary
+    // line, grey hints, amber ⚠ lines, breathing room between lines).
     h.info = CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_OWNERDRAW,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_LABEL_INFO), inst, nullptr);
 
     h.status = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
