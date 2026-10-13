@@ -105,7 +105,13 @@ TEST(PerfBench, SearchWarmMillionEntries) {
                   [&](const VolumeIndex::SearchHit&) { ++n; return true; });
         double ms = MsSince(tq);
         printf("[bench] search %-16ls : %8.1f ms (%zu hits)\n", q, ms, n);
+        // Debug (unoptimized) runs ~25x slower than Release — the budget is
+        // a Release contract; Debug gets a proportional ceiling.
+#ifdef NDEBUG
         EXPECT_LT(ms, 2000.0);
+#else
+        EXPECT_LT(ms, 60000.0);
+#endif
     }
     printf("[bench] synthetic index build (1,000,001 nodes): %.1f ms\n", buildMs);
     vi.ResetForTesting();

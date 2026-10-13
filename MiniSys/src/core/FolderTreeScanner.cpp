@@ -61,7 +61,10 @@ void FolderTreeScanner::Scan(std::vector<ScanItem>& out,
         std::sort(subdirs.begin(), subdirs.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
 
-        // Compute sizes
+        // Compute sizes + emit, then recurse one level deeper per level
+        // (v2.18: 层层分析). Child items carry the PARENT FOLDER PATH in
+        // `category` — the presenter builds the tree from that linkage.
+        std::vector<fs::path> nextLevel;
         size_t idx = 0;
         for (const auto& [dirPath, name] : subdirs) {
             if (cancel.load()) break;
@@ -70,7 +73,7 @@ void FolderTreeScanner::Scan(std::vector<ScanItem>& out,
                     drive + name + L"  计算大小中…");
             }
 
-            unsigned long long sz = DirectorySize(dirPath);
+            unsigned long long sz = DirectorySizeParallel(dirPath, 2);
 
             ScanItem item;
             item.category  = drive;
@@ -90,7 +93,59 @@ void FolderTreeScanner::Scan(std::vector<ScanItem>& out,
                 item.createTime = item.lastWriteFiletime;
             }
             out.push_back(std::move(item));
+            nextLevel.push_back(dirPath);
             ++idx;
+        }
+
+        // v2.18: nested levels.
+        for (int level = 1; level < cfg_.depth; ++level) {
+            std::vector<fs::path> thisLevel = std::move(nextLevel);
+            nextLevel.clear();
+            for (const auto& parent : thisLevel) {
+                if (cancel.load()) break;
+                std::wstring searchPath = parent.wstring();
+                if (!searchPath.empty() && searchPath.back() != L'\\')
+                    searchPath.push_back(L'\\');
+                searchPath.push_back(L'*');
+                WIN32_FIND_DATAW fdd{};
+                HANDLE hh = FindFirstFileExW(
+                    LongPath(fs::path(searchPath)).c_str(),
+                    FindExInfoBasic, &fdd, FindExSearchNameMatch, nullptr,
+                    FIND_FIRST_EX_LARGE_FETCH);
+                if (hh == INVALID_HANDLE_VALUE) continue;
+                std::vector<fs::path> kids;
+                do {
+                    const wchar_t* n = fdd.cFileName;
+                    if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+                    if (!(fdd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (fdd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                    kids.push_back(parent / n);
+                } while (FindNextFileW(hh, &fdd));
+                FindClose(hh);
+                if (progress && !kids.empty()) {
+                    progress(0, 0, parent.wstring() + L" …");
+                }
+                for (const auto& kid : kids) {
+                    if (cancel.load()) break;
+                    ScanItem item;
+                    item.category  = parent.wstring();   // linkage to parent node
+                    item.title     = kid.filename().wstring();
+                    item.path      = kid;
+                    item.sizeBytes = DirectorySizeParallel(kid, 2);
+                    item.detail    = parent.wstring();
+                    item.recommended = false;
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(LongPath(kid).c_str(),
+                                             GetFileExInfoStandard, &fad)) {
+                        item.lastWriteFiletime =
+                            (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+                            static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+                        item.createTime = item.lastWriteFiletime;
+                    }
+                    out.push_back(std::move(item));
+                    nextLevel.push_back(kid);
+                }
+            }
         }
     }
 

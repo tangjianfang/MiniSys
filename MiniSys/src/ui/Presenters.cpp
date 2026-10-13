@@ -139,7 +139,7 @@ void ListTabPresenter::RenderItems() {
     // text is supplied on demand via SupplyDispInfo.
     const std::vector<std::pair<const wchar_t*, int>> kScanCols = {
         { L"分类", 150 }, { L"风险", 100 }, { L"项目", 300 },
-        { L"大小", 90 }, { L"详情", 260 }, { L"修改时间", 110 },
+        { L"大小", 90 }, { L"详情", 240 }, { L"修改时间", 130 },
     };
     HWND hdr = ListView_GetHeader(ui_.list);
     int oldColCount = hdr ? Header_GetItemCount(hdr) : 0;
@@ -313,7 +313,8 @@ std::wstring OneLine(const std::wstring& s) {
     return out;
 }
 
-// review-07 X-9: "MM-dd HH:mm" (local time) for the 修改时间 column.
+// v2.18 (user request 2026-10-14): full year in the 修改时间 column —
+// "yyyy-MM-dd HH:mm". ISO-ish keeps lexicographic sort == chronological.
 std::wstring FormatTimeShort(uint64_t filetime) {
     if (filetime == 0) return L"—";
     ULARGE_INTEGER ul{};
@@ -327,9 +328,9 @@ std::wstring FormatTimeShort(uint64_t filetime) {
         !FileTimeToSystemTime(&localFt, &st)) {
         return L"—";
     }
-    wchar_t buf[32] = {};
-    swprintf_s(buf, L"%02d-%02d %02d:%02d",
-               st.wMonth, st.wDay, st.wHour, st.wMinute);
+    wchar_t buf[40] = {};
+    swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     return buf;
 }
 
@@ -646,13 +647,41 @@ void FolderTreePresenter::Refresh() {
     auto items = svc_.Results(TabId::FolderTree);   // copy (P1-1)
     if (items.empty()) return;
 
-    std::wstring lastDrive;
+    // v2.18: two passes. Level-1 items (category == a drive root) create
+    // drive + folder nodes as before; nested items (category == a parent
+    // folder path) attach under that parent's node — the multi-level
+    // analysis the user asked for (层层分析).
+    std::map<std::wstring, HTREEITEM> nodeByPath;
+    std::vector<size_t> nested;                      // deferred child rows
+    std::vector<std::wstring> lastDriveHolder;
     HTREEITEM hDriveNode = nullptr;
 
+    auto insertFolder = [&](const std::wstring& parentKey, HTREEITEM hParent,
+                            size_t i, const ScanItem& it) {
+        std::wstring label = FormatW(L"%s  (%s)", it.title.c_str(),
+                                     FormatSize(it.sizeBytes).c_str());
+        TVINSERTSTRUCTW tvis{};
+        tvis.hParent      = hParent;
+        tvis.hInsertAfter = TVI_LAST;
+        tvis.item.mask    = TVIF_TEXT | TVIF_PARAM;
+        tvis.item.pszText = label.data();
+        tvis.item.lParam  = static_cast<LPARAM>(i);
+        HTREEITEM hItem = TreeView_InsertItem(ui_.tree, &tvis);
+        if (hItem) {
+            itemPaths_[hItem] = it.path;
+            nodeByPath[it.path.wstring()] = hItem;
+        }
+        return hItem;
+    };
+
+    // Pass 1: drive nodes + level-1 folders (category is a drive root).
+    std::wstring lastDrive;
     for (size_t i = 0; i < items.size(); ++i) {
         const auto& it = items[i];
+        bool isDriveLevel = it.category.size() >= 2 && it.category[1] == L':'
+                            && (it.category.size() == 3);   // "C:\"
+        if (!isDriveLevel) { nested.push_back(i); continue; }
 
-        // Insert drive node when drive changes
         if (it.category != lastDrive) {
             lastDrive = it.category;
             DiskSpace ds{};
@@ -671,24 +700,35 @@ void FolderTreePresenter::Refresh() {
             tvis.item.lParam  = -1;
             hDriveNode = TreeView_InsertItem(ui_.tree, &tvis);
         }
-
-        // Insert folder node
-        std::wstring label = FormatW(L"%s  (%s)", it.title.c_str(),
-                                     FormatSize(it.sizeBytes).c_str());
-        TVINSERTSTRUCTW tvis{};
-        tvis.hParent      = hDriveNode;
-        tvis.hInsertAfter = TVI_LAST;
-        tvis.item.mask    = TVIF_TEXT | TVIF_PARAM;
-        tvis.item.pszText = label.data();
-        tvis.item.lParam  = static_cast<LPARAM>(i);
-        HTREEITEM hItem = TreeView_InsertItem(ui_.tree, &tvis);
-        if (hItem) itemPaths_[hItem] = it.path;
+        insertFolder(L"", hDriveNode, i, it);
     }
 
-    // Expand all drive nodes
+    // Pass 2: nested levels — attach each child to its parent's node
+    // (repeat rounds so deeper levels find parents inserted before them).
+    for (int round = 0; round < 4 && !nested.empty(); ++round) {
+        std::vector<size_t> stillOrphans;
+        for (size_t i : nested) {
+            const auto& it = items[i];
+            auto pit = nodeByPath.find(it.category);
+            if (pit != nodeByPath.end()) {
+                insertFolder(it.category, pit->second, i, it);
+            } else {
+                stillOrphans.push_back(i);
+            }
+        }
+        if (stillOrphans.size() == nested.size()) break;   // no progress
+        nested = std::move(stillOrphans);
+    }
+
+    // Expand drive + level-1 nodes (keep deeper collapsed for readability).
     HTREEITEM h = TreeView_GetRoot(ui_.tree);
     while (h) {
         TreeView_Expand(ui_.tree, h, TVE_EXPAND);
+        HTREEITEM c = TreeView_GetChild(ui_.tree, h);
+        while (c) {
+            TreeView_Expand(ui_.tree, c, TVE_EXPAND);
+            c = TreeView_GetNextSibling(ui_.tree, c);
+        }
         h = TreeView_GetNextSibling(ui_.tree, h);
     }
 }

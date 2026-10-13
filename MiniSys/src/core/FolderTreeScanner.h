@@ -14,6 +14,11 @@ public:
     struct Config {
         // Drive roots to scan (e.g. {"C:\\", "D:\\"}). Empty = all fixed drives.
         std::vector<std::wstring> drives;
+        // v2.18 (user request): how many levels BELOW the drive root to
+        // analyze in one scan (1 = old top-level-only behavior, 2 = one
+        // nested level). Deeper exploration stays interactive via the
+        // existing double-click drill-down.
+        int depth = 2;
     };
 
     FolderTreeScanner();
