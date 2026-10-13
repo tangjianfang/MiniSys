@@ -38,15 +38,25 @@ TEST(SearchChain, RealWalkIndexReturnsHits) {
     // A term that MUST exist on any Windows volume: "win" (Windows dir),
     // "system", ".dll".
     for (const wchar_t* q : { L"win", L"system", L".dll" }) {
-        size_t n = 0;
+        size_t n = 0, deep = 0;
+        std::wstring firstPath;
         for (auto* v : vols) {
-            n += v->Search(q, false, 100, [&](const VolumeIndex::SearchHit&) {
-                ++n;
-                return true;
-            });
+            n += v->Search(q, false, 100,
+                [&](const VolumeIndex::SearchHit& h) {
+                    if (firstPath.empty()) firstPath = h.path;
+                    // v2.17b: a subdirectory-bearing path (e.g.
+                    // C:\Program Files\...) — root-level hits exist too,
+                    // so we count rather than demand it of the first row.
+                    if (h.path.rfind(L'\\') > 3) ++deep;
+                    ++n;
+                    return true;
+                });
         }
-        printf("[repro] search '%ls' -> %zu hits\n", q, n);
+        printf("[repro] search '%ls' -> %zu hits (deep=%zu), first='%ls'\n",
+               q, n, deep, firstPath.c_str());
         EXPECT_GT(n, 0u) << "query returned 0 over a real index";
+        EXPECT_GT(deep, n / 4u)
+            << "almost no hit carries a subdirectory path — parent-chain bug";
     }
 }
 

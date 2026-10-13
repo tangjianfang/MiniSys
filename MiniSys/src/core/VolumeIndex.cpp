@@ -586,7 +586,12 @@ bool VolumeIndex::WalkBuild(wchar_t drive,
                 FindExSearchNameMatch, nullptr,
                 FIND_FIRST_EX_LARGE_FETCH);
 
-            std::vector<std::pair<std::wstring, bool>> children;   // name, isDir
+            // v2.17b CRITICAL: this was pair<wstring, bool> (a leftover
+            // from the serial draft) while the push below stores the CHILD
+            // DIRECTORY'S FRN — every frn truncated to bool=1, so EVERY
+            // node's parent became the root (all paths C:\<name>, sizes
+            // unresolvable). Warnings-as-errors would have caught it.
+            std::vector<std::pair<std::wstring, uint64_t>> children;
             if (h != INVALID_HANDLE_VALUE) {
                 do {
                     const wchar_t* nm = fd.cFileName;
