@@ -730,6 +730,11 @@ void MainWindow::OnCreate() {
                 if (_wcsicmp(argv[i], L"-probe") == 0 && i + 1 < argc) {
                     probeQuery_ = argv[i + 1];
                     ++i;
+                    // The probe waits for an index build; make sure one
+                    // actually starts regardless of the restored tab.
+                    TabCtrl_SetCurSel(h_.tab,
+                                      static_cast<int>(TabId::Search));
+                    OnTabChanged();
                 }
             }
             LocalFree(argv);

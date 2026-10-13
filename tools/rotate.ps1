@@ -1,4 +1,4 @@
-# MiniSys 版本轮换(用户指令:每次修改完成后自动关闭进程,启动新构建)
+﻿# MiniSys 版本轮换(用户指令:每次修改完成后自动关闭进程,启动新构建)
 # 用法: powershell -File tools\rotate.ps1 [-Probe pdb]
 # 行为: 以提权方式启动 build\Latest\MiniSys.exe -takeover(会弹一次 UAC);
 #       新实例优雅关闭旧实例(保存设置/等待 worker)后接管。

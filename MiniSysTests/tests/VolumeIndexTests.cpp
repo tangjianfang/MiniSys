@@ -148,21 +148,19 @@ TEST_F(VolumeIndexTest, EverythingStyleSearch) {
     EXPECT_NE(rs[1].path.find(L"file.txt"), std::wstring::npos);
 }
 
-TEST(VolumeIndexIntegration, RealBuildRequiresAdmin) {
-    // FSCTL_ENUM_USN_DATA needs an elevated process. Non-elevated test runs
-    // must gracefully fail (the FastWalk fallback path in JunkScanner).
+TEST(VolumeIndexIntegration, RealBuildAnyElevation) {
+    // v2.16c: unelevated processes now WALK-build the index (user directive:
+    // no admin unless necessary) — so EnsureBuilt must succeed either way:
+    // elevated via USN, unelevated via the filesystem walk. Both must answer
+    // a directory every Windows volume has.
     auto& idx = VolumeIndex::Instance();
     idx.ResetForTesting();
     std::atomic<bool> cancel{false};
     bool built = idx.EnsureBuilt(L'C', nullptr, cancel);
-    if (!IsElevated()) {
-        EXPECT_FALSE(built) << "USN enumeration should fail without elevation";
-    } else {
-        // Elevated: the build must succeed and answer a known dir.
-        EXPECT_TRUE(built);
-        EXPECT_TRUE(idx.HasDir(L"C:\\Windows"));
-        EXPECT_GT(idx.EntryCount(), 1000u);
-    }
+    EXPECT_TRUE(built) << (IsElevated() ? L"USN build (elevated)"
+                                        : L"walk fallback (unelevated)");
+    EXPECT_TRUE(idx.HasDir(L"C:\\Windows"));
+    EXPECT_GT(idx.EntryCount(), 1000u);
 }
 
 TEST_F(VolumeIndexTest, IncrementalChangesApply) {

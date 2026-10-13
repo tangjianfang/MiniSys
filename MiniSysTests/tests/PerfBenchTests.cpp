@@ -13,6 +13,46 @@
 #include <vector>
 
 namespace minisys {
+
+// v2.16c: THE search repro — a REAL volume index (unelevated walk fallback,
+// the new default), searched through the SAME chain the app uses
+// (ValidVolumes + Search). This is the test that would have caught the
+// "0 hits over a 3M index" bug before any user saw it.
+TEST(SearchChain, RealWalkIndexReturnsHits) {
+    auto& vi = VolumeIndex::For(L'C');
+    std::atomic<bool> cancel{false};
+    // Unelevated: USN open fails → walk fallback builds the full tree.
+    // (Slow first time — ~1-3 min on a big C: — but it persists to the
+    // cache, so repeat runs load in seconds.)
+    bool ok = vi.EnsureBuilt(L'C', nullptr, cancel);
+    printf("[repro] EnsureBuilt ok=%d valid=%d entries=%zu\n",
+           ok ? 1 : 0, vi.IsValid() ? 1 : 0, vi.EntryCount());
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(vi.IsValid());
+
+    // The app chain: registry → valid volumes → Search.
+    auto vols = VolumeIndex::ValidVolumes();
+    printf("[repro] ValidVolumes=%zu\n", vols.size());
+    ASSERT_GE(vols.size(), 1u);
+
+    // A term that MUST exist on any Windows volume: "win" (Windows dir),
+    // "system", ".dll".
+    for (const wchar_t* q : { L"win", L"system", L".dll" }) {
+        size_t n = 0;
+        for (auto* v : vols) {
+            n += v->Search(q, false, 100, [&](const VolumeIndex::SearchHit&) {
+                ++n;
+                return true;
+            });
+        }
+        printf("[repro] search '%ls' -> %zu hits\n", q, n);
+        EXPECT_GT(n, 0u) << "query returned 0 over a real index";
+    }
+}
+
+} // namespace minisys
+
+namespace minisys {
 namespace {
 
 using Clock = std::chrono::steady_clock;

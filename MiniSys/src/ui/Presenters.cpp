@@ -180,21 +180,31 @@ void ListTabPresenter::SyncCheckDefaults() {
 }
 
 // v2.15: virtual cell supply.
+// v2.16d CRASH FIX (WER 0xc000041d @ Presenters.cpp:191, source-line
+// symbolized via dbghelp): cells_ can be stale/smaller than snapshot_
+// across tab switches and background prunes — the row check alone allowed
+// an out-of-range vector index inside the ListView callback, which took
+// the whole process down mid-startup ("silent death" sessions). Every
+// access is now bounds-checked; on mismatch we answer nothing (blank cell)
+// instead of crashing.
 bool ListTabPresenter::SupplyDispInfo(NMLVDISPINFOW* di) {
     int row = di->item.iItem;
     if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return false;
     if (di->item.mask & LVIF_TEXT) {
         int col = di->item.iSubItem;
         if (col < 0 || col > 5) return false;
-        const std::wstring& text = cells_[
-            static_cast<size_t>(row) * 6 + static_cast<size_t>(col)];
-        wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(),
+        size_t idx = static_cast<size_t>(row) * 6 + static_cast<size_t>(col);
+        if (idx >= cells_.size()) {
+            di->item.pszText[0] = L'\0';
+            return true;
+        }
+        wcsncpy_s(di->item.pszText, di->item.cchTextMax, cells_[idx].c_str(),
                   _TRUNCATE);
     }
     if (di->item.mask & LVIF_STATE) {
         // Checkbox image state comes from the authoritative map.
         if (di->item.stateMask & LVIS_STATEIMAGEMASK) {
-            auto key = ToLower(snapshot_[row].path.wstring());
+            auto key = ToLower(snapshot_[static_cast<size_t>(row)].path.wstring());
             auto it = checkStateByPath_.find(key);
             bool checked = it != checkStateByPath_.end() && it->second;
             di->item.state = INDEXTOSTATEIMAGEMASK(checked ? 2 : 1);
@@ -853,9 +863,12 @@ bool HistoryPresenter::SupplyDispInfo(NMLVDISPINFOW* di) {
     if (di->item.mask & LVIF_TEXT) {
         int col = di->item.iSubItem;
         if (col < 0 || col > 4) return false;
-        const std::wstring& text = cells_[
-            static_cast<size_t>(row) * 5 + static_cast<size_t>(col)];
-        wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(),
+        size_t idx = static_cast<size_t>(row) * 5 + static_cast<size_t>(col);
+        if (idx >= cells_.size()) {   // v2.16d crash guard (see above)
+            di->item.pszText[0] = L'\0';
+            return true;
+        }
+        wcsncpy_s(di->item.pszText, di->item.cchTextMax, cells_[idx].c_str(),
                   _TRUNCATE);
     }
     return true;   // no checkboxes on this page
