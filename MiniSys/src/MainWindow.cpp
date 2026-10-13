@@ -123,6 +123,21 @@ void DrawInfoText(const DRAWITEMSTRUCT& dis) {
     std::wstring text(buf, static_cast<size_t>(len));
 
     HDC dc = dis.hDC;
+    // v2.19a FIX (live screenshot caught it): nothing erases an
+    // SS_OWNERDRAW static between draws here (no WM_CTLCOLORSTATIC
+    // handler), so a redraw after the text/height changed left the OLD
+    // pixels under the new lines — early lines read as interleaved
+    // garbage while the last line (never overlapped) stayed clean.
+    // Paint the slate ourselves, with the window-class brush.
+    FillRect(dc, &dis.rcItem, GetSysColorBrush(COLOR_BTNFACE));
+
+    static int loggedDraws = 0;
+    if (loggedDraws++ < 2) {
+        MS_LOG_INFO(L"DrawInfoText: %d chars, %d lines", len,
+                    1 + static_cast<int>(std::count(text.begin(), text.end(),
+                                                    L'\n')));
+    }
+
     RECT rc = dis.rcItem;
     rc.left += 2;
     rc.top += 1;
