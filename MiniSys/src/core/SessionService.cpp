@@ -41,6 +41,7 @@ UINT DoneMessageFor(SessionService::TaskKind kind) {
         case SessionService::TaskKind::Searching:  return WM_APP_SEARCH_DONE;
         case SessionService::TaskKind::Verifying:  return WM_APP_VERIFY_DONE;
         case SessionService::TaskKind::Previewing: return WM_APP_PREVIEW_DONE;
+        case SessionService::TaskKind::FolderExpand: return WM_APP_TREE_CHILDREN;
         case SessionService::TaskKind::Executing:
         case SessionService::TaskKind::None:
         default:                                   return WM_APP_OP_DONE;
@@ -293,6 +294,23 @@ bool SessionService::TryLoadCachedResults(TabId tab) {
             if (items.empty()) return false;
         }
 
+        // v2.23 (user report: 文件夹分析只有一级): a FolderTree cache whose
+        // every category is a bare drive root predates the v2.18 multi-level
+        // scanner — it masked the new depth with a one-level tree. Treat it
+        // as stale so the tab asks for a fresh scan instead.
+        if (tab == TabId::FolderTree) {
+            bool anyNested = false;
+            for (const auto& it : items) {
+                bool isDriveRoot = it.category.size() == 3 && it.category[1] == L':';
+                if (!isDriveRoot) { anyNested = true; break; }
+            }
+            if (!anyNested) {
+                MS_LOG_INFO(L"FolderTree cache is pre-v2.18 (one level) — "
+                            L"discarding for a fresh multi-level scan");
+                return false;
+            }
+        }
+
         std::lock_guard<std::mutex> g(resultsMu_);
         if (!results_[static_cast<size_t>(tab)].empty()) return false;
         results_[static_cast<size_t>(tab)]    = std::move(items);
@@ -507,6 +525,59 @@ bool SessionService::IdleMaintenanceAsync() {
                       refreshed, prunedRows)
             : FormatW(L"空闲维护完成: %zu 个磁盘已增量刷新", refreshed));
         Post(hwnd, WM_APP_SCAN_PROGRESS);
+    });
+}
+
+bool SessionService::FolderChildrenAsync(const std::wstring& dir) {
+    if (IsBusy()) return false;
+    SetProgress(L"展开文件夹…");
+    HWND hwnd = hwnd_;
+    std::wstring key = ToLower(dir);
+    return StartTask(TaskKind::FolderExpand, [this, dir, key, hwnd]() {
+        std::vector<ScanItem> items;
+        std::wstring searchPath = dir;
+        if (!searchPath.empty() && searchPath.back() != L'\\') {
+            searchPath.push_back(L'\\');
+        }
+        searchPath.push_back(L'*');
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileExW(LongPath(std::filesystem::path(searchPath)).c_str(),
+                                    FindExInfoBasic, &fd,
+                                    FindExSearchNameMatch, nullptr,
+                                    FIND_FIRST_EX_LARGE_FETCH);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (cancelScan_.load()) break;
+                const wchar_t* n = fd.cFileName;
+                if (n[0] == L'.' && (n[1] == 0 || (n[1] == L'.' && n[2] == 0))) continue;
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                std::filesystem::path kid = std::filesystem::path(dir) / n;
+                ScanItem item;
+                item.category  = dir;        // same linkage convention as FolderTreeScanner
+                item.title     = n;
+                item.path      = kid;
+                item.sizeBytes = DirectorySizeParallel(kid, 4);
+                item.detail    = dir;
+                item.recommended = false;
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (GetFileAttributesExW(LongPath(kid).c_str(),
+                                         GetFileExInfoStandard, &fad)) {
+                    item.lastWriteFiletime =
+                        (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+                        static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+                    item.createTime = item.lastWriteFiletime;
+                }
+                items.push_back(std::move(item));
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        std::stable_sort(items.begin(), items.end(),
+            [](const ScanItem& a, const ScanItem& b) {
+                return a.sizeBytes > b.sizeBytes;
+            });
+        auto* out = new TreeChildren{ key, std::move(items) };
+        Post(hwnd, WM_APP_TREE_CHILDREN, 0, reinterpret_cast<LPARAM>(out));
     });
 }
 

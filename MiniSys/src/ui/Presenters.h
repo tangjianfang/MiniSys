@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -193,6 +194,18 @@ public:
     // item was deleted and the tree changed.
     bool OnContextMenu();
 
+    // v2.23: lazy expansion — TVN_ITEMEXPANDING on an unloaded node kicks a
+    // worker fetch (FolderChildrenAsync); WM_APP_TREE_CHILDREN applies it
+    // (MainWindow unpacks the heap payload and calls ApplyChildren).
+    bool OnItemExpanding(HTREEITEM item);
+    void ApplyChildren(const std::wstring& parentLower,
+                       std::vector<ScanItem> items);
+    // v2.23: path lookup for drill-down (lazy nodes carry no lParam index).
+    std::filesystem::path PathOfItem(HTREEITEM item) const {
+        auto it = itemPaths_.find(item);
+        return it == itemPaths_.end() ? std::filesystem::path{} : it->second;
+    }
+
     // REVIEW P3: drill into a subfolder (double-click) — the scan then
     // covers that folder's top level instead of all fixed drives; clicking
     // 扫描 again returns to the full-drive view.
@@ -206,6 +219,13 @@ private:
     SessionService& svc_;
     std::map<HTREEITEM, std::filesystem::path> itemPaths_;
     std::filesystem::path focusRoot_;   // REVIEW P3 drill-down
+    // v2.23 lazy expansion state
+    std::map<std::wstring, HTREEITEM> nodeByPath_;      // lowercase path → node
+    std::set<std::wstring> childrenLoaded_;             // lowercase paths
+    HTREEITEM loadingItem_ = nullptr;                   // "加载中…" placeholder
+    HTREEITEM InsertFolderNode(HTREEITEM hParent, const std::wstring& title,
+                               unsigned long long sizeBytes,
+                               const std::filesystem::path& path);
 };
 
 class HistoryPresenter : public TabPresenter {

@@ -32,7 +32,7 @@ public:
     void SetWindow(HWND hwnd) { hwnd_ = hwnd; }
 
     enum class TaskKind { None = 0, Scanning = 1, Executing = 2, Searching = 3,
-                          Verifying = 4, Previewing = 5 };
+                          Verifying = 4, Previewing = 5, FolderExpand = 6 };
 
     bool IsBusy() const { return taskKind_.load() != 0; }
     bool IsScanning() const { return taskKind_.load() == static_cast<int>(TaskKind::Scanning); }
@@ -74,6 +74,14 @@ public:
     // an in-flight search via CancelScan(); completion posts
     // WM_APP_SEARCH_DONE, results land in Results(TabId::Search).
     bool SearchAsync(const std::wstring& query, bool matchPath);
+    // v2.23: lazy folder-tree expansion — enumerate `dir`'s subdirectories
+    // (with parallel subtree sizes) on the worker; the result arrives as
+    // WM_APP_TREE_CHILDREN with a heap TreeChildren* in LPARAM.
+    struct TreeChildren {
+        std::wstring parent;          // lowercased match key
+        std::vector<ScanItem> items;  // category = parent's full path
+    };
+    bool FolderChildrenAsync(const std::wstring& dir);
 
     // ---- execution -------------------------------------------------------
     struct ExecuteReport {

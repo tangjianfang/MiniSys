@@ -49,6 +49,7 @@
 #define IDC_ACCEL_PALETTE           2091  // v2.10: Ctrl+K command palette
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)
+#define WM_APP_TREE_CHILDREN        (WM_APP + 9)  // v2.23: lazy folder-tree expansion (LPARAM = heap TreeChildren*)
 // v2.8: worker-side list verify / GuardRails preview completion
 #define WM_APP_VERIFY_DONE          (WM_APP + 7)
 #define WM_APP_PREVIEW_DONE         (WM_APP + 8)

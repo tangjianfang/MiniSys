@@ -663,9 +663,78 @@ void FolderTreePresenter::OnScanDone() {
     Refresh();
 }
 
+// v2.23: shared node factory — every folder node carries cChildren=1 so the
+// expander chevron always shows; deeper levels load lazily
+// (OnItemExpanding → FolderChildrenAsync).
+HTREEITEM FolderTreePresenter::InsertFolderNode(HTREEITEM hParent,
+                                                const std::wstring& title,
+                                                unsigned long long sizeBytes,
+                                                const std::filesystem::path& path) {
+    std::wstring label = FormatW(L"%s  (%s)", title.c_str(),
+                                 FormatSize(sizeBytes).c_str());
+    TVINSERTSTRUCTW tvis{};
+    tvis.hParent      = hParent;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask    = TVIF_TEXT | TVIF_CHILDREN;
+    tvis.item.pszText = label.data();
+    tvis.item.cChildren = 1;
+    HTREEITEM hItem = TreeView_InsertItem(ui_.tree, &tvis);
+    if (hItem) {
+        itemPaths_[hItem] = path;
+        nodeByPath_[ToLower(path.wstring())] = hItem;
+    }
+    return hItem;
+}
+
+// v2.23: lazy expansion entry. Returns TRUE to allow the expand (the
+// placeholder keeps the node visually open while the worker fetches).
+bool FolderTreePresenter::OnItemExpanding(HTREEITEM item) {
+    if (!item) return TRUE;
+    auto it = itemPaths_.find(item);
+    if (it == itemPaths_.end()) return TRUE;   // drive node or unknown
+    std::wstring key = ToLower(it->second.wstring());
+    if (childrenLoaded_.count(key)) return TRUE;
+
+    // "加载中…" placeholder — also blocks a second expanding burst.
+    std::wstring loading = L"… 加载中";
+    TVINSERTSTRUCTW tvis{};
+    tvis.hParent      = item;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.item.mask    = TVIF_TEXT;
+    tvis.item.pszText = loading.data();
+    loadingItem_ = TreeView_InsertItem(ui_.tree, &tvis);
+
+    if (!SessionService::Instance().FolderChildrenAsync(it->second.wstring())) {
+        if (loadingItem_) {
+            TreeView_DeleteItem(ui_.tree, loadingItem_);
+            loadingItem_ = nullptr;
+        }
+        SetWindowTextW(ui_.info, L"ℹ 后台忙，稍后再次展开该文件夹。");
+    }
+    return TRUE;
+}
+
+// v2.23: worker result — replace the placeholder with real children.
+void FolderTreePresenter::ApplyChildren(const std::wstring& parentLower,
+                                        std::vector<ScanItem> items) {
+    auto pit = nodeByPath_.find(parentLower);
+    if (loadingItem_) {
+        TreeView_DeleteItem(ui_.tree, loadingItem_);
+        loadingItem_ = nullptr;
+    }
+    childrenLoaded_.insert(parentLower);
+    if (pit == nodeByPath_.end()) return;   // tree rebuilt meanwhile — drop
+    for (auto& it : items) {
+        InsertFolderNode(pit->second, it.title, it.sizeBytes, it.path);
+    }
+}
+
 void FolderTreePresenter::Refresh() {
     TreeView_DeleteAllItems(ui_.tree);
     itemPaths_.clear();
+    nodeByPath_.clear();
+    childrenLoaded_.clear();
+    loadingItem_ = nullptr;
 
     auto items = svc_.Results(TabId::FolderTree);   // copy (P1-1)
     if (items.empty()) return;
@@ -674,28 +743,8 @@ void FolderTreePresenter::Refresh() {
     // drive + folder nodes as before; nested items (category == a parent
     // folder path) attach under that parent's node — the multi-level
     // analysis the user asked for (层层分析).
-    std::map<std::wstring, HTREEITEM> nodeByPath;
     std::vector<size_t> nested;                      // deferred child rows
-    std::vector<std::wstring> lastDriveHolder;
     HTREEITEM hDriveNode = nullptr;
-
-    auto insertFolder = [&](const std::wstring& parentKey, HTREEITEM hParent,
-                            size_t i, const ScanItem& it) {
-        std::wstring label = FormatW(L"%s  (%s)", it.title.c_str(),
-                                     FormatSize(it.sizeBytes).c_str());
-        TVINSERTSTRUCTW tvis{};
-        tvis.hParent      = hParent;
-        tvis.hInsertAfter = TVI_LAST;
-        tvis.item.mask    = TVIF_TEXT | TVIF_PARAM;
-        tvis.item.pszText = label.data();
-        tvis.item.lParam  = static_cast<LPARAM>(i);
-        HTREEITEM hItem = TreeView_InsertItem(ui_.tree, &tvis);
-        if (hItem) {
-            itemPaths_[hItem] = it.path;
-            nodeByPath[it.path.wstring()] = hItem;
-        }
-        return hItem;
-    };
 
     // Pass 1: drive nodes + level-1 folders (category is a drive root).
     std::wstring lastDrive;
@@ -722,8 +771,10 @@ void FolderTreePresenter::Refresh() {
             tvis.item.pszText = driveLabel.data();
             tvis.item.lParam  = -1;
             hDriveNode = TreeView_InsertItem(ui_.tree, &tvis);
+            if (hDriveNode) nodeByPath_[ToLower(it.category)] = hDriveNode;
         }
-        insertFolder(L"", hDriveNode, i, it);
+        InsertFolderNode(hDriveNode, it.title, it.sizeBytes, it.path);
+        childrenLoaded_.insert(ToLower(it.category));   // level-1 comes from scan
     }
 
     // Pass 2: nested levels — attach each child to its parent's node
@@ -732,9 +783,10 @@ void FolderTreePresenter::Refresh() {
         std::vector<size_t> stillOrphans;
         for (size_t i : nested) {
             const auto& it = items[i];
-            auto pit = nodeByPath.find(it.category);
-            if (pit != nodeByPath.end()) {
-                insertFolder(it.category, pit->second, i, it);
+            auto pit = nodeByPath_.find(ToLower(it.category));
+            if (pit != nodeByPath_.end()) {
+                InsertFolderNode(pit->second, it.title, it.sizeBytes, it.path);
+                childrenLoaded_.insert(ToLower(it.category));
             } else {
                 stillOrphans.push_back(i);
             }

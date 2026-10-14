@@ -117,11 +117,14 @@ HFONT BoldUiFont(HWND ctl) {
     return bold;
 }
 
-// v2.22 (user request: "table 栏也要支持样式区分"): owner-drawn tab strip.
-// The v2.19 bold-only selected state still read as "same style" — now the
-// selected page is a WHITE chip with an ACCENT underline and accent bold
-// text; unselected tabs sit quiet on the chrome. Flat, consistent with
-// the single-accent language.
+// v2.23 (user: "table 栏有点土,以浅色为主"): light-theme tokens shared by
+// the chrome erase and the tab strip.
+constexpr COLORREF kChromeBgr = RGB(0xF5, 0xF6, 0xF8);   // near-white chrome
+constexpr COLORREF kTabPill   = RGB(0xE8, 0xF1, 0xFB);   // soft accent tint
+
+// v2.22→v2.23: owner-drawn tab strip — the selected page is now a SOFT
+// LIGHT-BLUE PILL with accent bold text (the v2.22 white-chip + hard
+// underline read as dated); unselected tabs melt into the light chrome.
 void DrawTabItem(const DRAWITEMSTRUCT& dis) {
     wchar_t text[64] = {};
     TCITEMW ti{};
@@ -142,20 +145,26 @@ void DrawTabItem(const DRAWITEMSTRUCT& dis) {
                                       &hct, 0) &&
                 (hct.dwFlags & HCF_HIGHCONTRASTON);
 
-    if (selected) {
-        if (hcOn) {
-            FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
-        } else {
-            FillRect(dc, &rc,
-                     reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
-            RECT bar = rc;
-            bar.top = rc.bottom - UiScale(dis.hwndItem, 3);
-            HBRUSH ab = CreateSolidBrush(RGB(0x00, 0x67, 0xC0));
-            FillRect(dc, &bar, ab);
-            DeleteObject(ab);
-        }
+    if (hcOn) {
+        FillRect(dc, &rc, selected ? GetSysColorBrush(COLOR_WINDOW)
+                                   : GetSysColorBrush(COLOR_BTNFACE));
+    } else if (selected) {
+        // rounded pill in the accent tint
+        HBRUSH pill = CreateSolidBrush(kTabPill);
+        HPEN pen = CreatePen(PS_SOLID, 1, kTabPill);
+        HGDIOBJ op = SelectObject(dc, pen);
+        HGDIOBJ ob = SelectObject(dc, pill);
+        int r = (rc.bottom - rc.top) / 2;
+        if (r > UiScale(dis.hwndItem, 14)) r = UiScale(dis.hwndItem, 14);
+        RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, r, r);
+        SelectObject(dc, op);
+        SelectObject(dc, ob);
+        DeleteObject(pen);
+        DeleteObject(pill);
     } else {
-        FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        HBRUSH chrome = CreateSolidBrush(kChromeBgr);
+        FillRect(dc, &rc, chrome);
+        DeleteObject(chrome);
     }
 
     SetBkMode(dc, TRANSPARENT);
@@ -453,6 +462,25 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             mmi->ptMinTrackSize.y = UiScale(hwnd_, 560);
             return 0;
         }
+        case WM_ERASEBKGND: {
+            // v2.23: light near-white chrome (the stock BTNFACE grey read
+            // dated); high-contrast themes keep the system surface.
+            HDC dc = reinterpret_cast<HDC>(wp);
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            HIGHCONTRASTW hce{ sizeof(hce) };
+            bool hcOn = SystemParametersInfoW(SPI_GETHIGHCONTRAST,
+                                              sizeof(hce), &hce, 0) &&
+                        (hce.dwFlags & HCF_HIGHCONTRASTON);
+            if (hcOn) {
+                FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+            } else {
+                HBRUSH bg = CreateSolidBrush(kChromeBgr);
+                FillRect(dc, &rc, bg);
+                DeleteObject(bg);
+            }
+            return 1;
+        }
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
             if (dis->CtlType == ODT_TAB) {
@@ -636,6 +664,18 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             } else if (nm->hwndFrom == h_.list && nm->code == LVN_COLUMNCLICK) {
                 auto nmlv = reinterpret_cast<LPNMLISTVIEW>(lp);
                 if (auto* p = ActivePresenter()) p->OnColumnClick(nmlv->iSubItem);
+            } else if (nm->hwndFrom == h_.tree &&
+                       nm->code == TVN_ITEMEXPANDING) {
+                // v2.23: lazy folder-tree expansion — unloaded nodes fetch
+                // their children on the worker (see FolderTreePresenter).
+                auto* nmtv = reinterpret_cast<LPNMTREEVIEW>(lp);
+                if (nmtv->action == TVE_EXPAND) {
+                    if (auto* p = ActivePresenter()) {
+                        if (auto* ftp = dynamic_cast<FolderTreePresenter*>(p)) {
+                            ftp->OnItemExpanding(nmtv->itemNew.hItem);
+                        }
+                    }
+                }
             } else if (nm->hwndFrom == h_.tree && nm->code == NM_RCLICK) {
                 if (auto* p = ActivePresenter()) {
                     auto* ftp = dynamic_cast<FolderTreePresenter*>(p);
@@ -654,28 +694,17 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     TVHITTESTINFO hti{}; hti.pt = ptClient;
                     HTREEITEM hItem = TreeView_HitTest(h_.tree, &hti);
                     if (!hItem) return 0;
-                    // Drive nodes have lParam == -1 → drill not available.
+                    // v2.23: lazy nodes carry no lParam index — ask the
+                    // presenter for the item's path directly.
                     if (hti.flags & TVHT_ONITEMLABEL) {
-                        auto path = ftp->FocusRoot();   // read current state
-                        (void)path;
-                        // Fetch the item's path from the presenter map via
-                        // right-click machinery: simplest is to reuse the
-                        // tree item's stored path through a small query.
-                        TVITEMEXW tvi{};
-                        tvi.hItem = hItem;
-                        tvi.mask = TVIF_PARAM;
-                        TreeView_GetItem(h_.tree, &tvi);
-                        if (tvi.lParam != -1) {
-                            auto items = SessionService::Instance().Results(TabId::FolderTree);
-                            auto idx = static_cast<size_t>(tvi.lParam);
-                            if (idx < items.size()) {
-                                ftp->SetFocusRoot(items[idx].path);
-                                // review-07 X-11 (v2.10): say WHERE the view
-                                // is now and how to get back.
-                                ShowHint(L"ℹ 已下钻到 " + items[idx].path.wstring() +
-                                         L"（再点一次“扫描”返回全盘视图）");
-                                OnScan();   // scan the drilled subtree
-                            }
+                        auto path = ftp->PathOfItem(hItem);
+                        if (!path.empty()) {
+                            ftp->SetFocusRoot(path);
+                            // review-07 X-11 (v2.10): say WHERE the view
+                            // is now and how to get back.
+                            ShowHint(L"ℹ 已下钻到 " + path.wstring() +
+                                     L"（再点一次“扫描”返回全盘视图）");
+                            OnScan();   // scan the drilled subtree
                         }
                     }
                 }
@@ -826,6 +855,21 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
             OnPlanDone();
             return 0;
+        case WM_APP_TREE_CHILDREN: {
+            // v2.23: lazy expansion payload from the worker — LPARAM owns a
+            // heap TreeChildren*; consume or drop it (never leak).
+            auto* tc = reinterpret_cast<SessionService::TreeChildren*>(lp);
+            std::unique_ptr<SessionService::TreeChildren> own(tc);
+            if (CurrentTab() == TabId::FolderTree) {
+                if (auto* p = ActivePresenter()) {
+                    if (auto* ftp = dynamic_cast<FolderTreePresenter*>(p)) {
+                        ftp->ApplyChildren(tc->parent, std::move(tc->items));
+                    }
+                }
+            }
+            SessionService::Instance().SetProgressText(L"");
+            return 0;
+        }
         case WM_APP_SEARCH_DONE:
             // REVIEW-UI P1 (04-1/U-1): async search completed on the worker.
             if (wp != SessionService::Instance().CurrentTaskGen()) return 0;
