@@ -191,6 +191,10 @@ private:
     std::atomic<int> taskKind_{0};          // TaskKind
     std::atomic<uint64_t> taskGen_{0};      // R-4: stamps DONE messages
     std::atomic<bool> cancelScan_{false};
+    // B-3 (review r6-03, P0): true while the idle-maintenance task runs
+    // (minutes-long re-walk) — interactive tasks preempt it via
+    // cancelScan_ so the 80 ms search retry converges in seconds.
+    std::atomic<bool> maintenanceActive_{false};
     mutable std::mutex progressMu_;
     std::wstring progressText_;
     mutable std::mutex resultsMu_;          // REVIEW P1-1

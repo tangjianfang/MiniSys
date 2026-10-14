@@ -97,18 +97,23 @@ std::wstring FormatAge(uint64_t filetime) {
     return buf;
 }
 
-// v2.19 (user image #8): bold variant of a control's UI font, created
-// once per process (the UI font never changes after CreateControls).
+// v2.19 (user image #8): bold variant of a control's UI font.
+// R-4 (review r6-04): a one-shot static also cached FAILURE — if the first
+// call preceded WM_SETFONT the bold font stayed dead for the process
+// lifetime. Retry until it succeeds (UI thread only).
 HFONT BoldUiFont(HWND ctl) {
-    static HFONT bold = [ctl]() -> HFONT {
+    static HFONT bold = nullptr;
+    if (!bold) {
         HFONT base = reinterpret_cast<HFONT>(
             SendMessageW(ctl, WM_GETFONT, 0, 0));
-        if (!base) return nullptr;
-        LOGFONTW lf{};
-        if (GetObjectW(base, sizeof(lf), &lf) == 0) return nullptr;
-        lf.lfWeight = FW_BOLD;
-        return CreateFontIndirectW(&lf);
-    }();
+        if (base) {
+            LOGFONTW lf{};
+            if (GetObjectW(base, sizeof(lf), &lf) != 0) {
+                lf.lfWeight = FW_BOLD;
+                bold = CreateFontIndirectW(&lf);
+            }
+        }
+    }
     return bold;
 }
 
@@ -144,6 +149,14 @@ void DrawInfoText(const DRAWITEMSTRUCT& dis) {
     rc.right -= 2;
 
     SetBkMode(dc, TRANSPARENT);
+    // X-43 (review r6-07, P1): the fixed grey/amber text colours are
+    // unreadable on unpredictable high-contrast backgrounds — fall back
+    // to the theme's window-text colour there (the fill already uses
+    // GetSysColorBrush, which adapts by itself).
+    HIGHCONTRASTW hci{ sizeof(hci) };
+    bool hcOn = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hci),
+                                      &hci, 0) &&
+                (hci.dwFlags & HCF_HIGHCONTRASTON);
     HFONT base = reinterpret_cast<HFONT>(
         SendMessageW(dis.hwndItem, WM_GETFONT, 0, 0));
     HFONT bold = BoldUiFont(dis.hwndItem);
@@ -162,7 +175,8 @@ void DrawInfoText(const DRAWITEMSTRUCT& dis) {
             bool warn = line[0] == L'⚠' || line[0] == L'❗';
             if (first && bold) SelectObject(dc, bold);
             else if (base) SelectObject(dc, base);
-            SetTextColor(dc, first ? RGB(0x1A, 0x1A, 0x1A)
+            SetTextColor(dc, hcOn ? GetSysColor(COLOR_WINDOWTEXT)
+                         : first ? RGB(0x1A, 0x1A, 0x1A)
                          : warn ? RGB(0xB2, 0x50, 0x00)
                                 : RGB(0x5A, 0x5A, 0x5A));
             RECT lineRc = rc;
@@ -380,6 +394,33 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     case CDDS_PREPAINT:
                         return CDRF_NOTIFYITEMDRAW;
                     case CDDS_ITEMPREPAINT: {
+                        // X-41 (review r6-07, P0 · pixel-verified): with
+                        // LVS_OWNERDATA the comctl6 ListView NEVER paints
+                        // the state-image slot even though LVN_GETDISPINFO
+                        // answers LVIF_STATE — every row's checkbox was
+                        // invisible while toggling kept working blindly.
+                        // Paint the glyph ourselves into the reserved slot
+                        // (before the high-contrast early return — the
+                        // glyph must render in HC themes too).
+                        if (auto* lpX = dynamic_cast<ListTabPresenter*>(
+                                ActivePresenter())) {
+                            RECT& rr = lpnmcd->nmcd.rc;
+                            if (rr.bottom > rr.top) {
+                                int box = UiScale(h_.list, 13);
+                                int pad = UiScale(h_.list, 2);
+                                RECT cb{ rr.left + pad,
+                                         rr.top + ((rr.bottom - rr.top) - box) / 2,
+                                         rr.left + pad + box,
+                                         rr.top + ((rr.bottom - rr.top) + box) / 2 };
+                                DrawFrameControl(
+                                    lpnmcd->nmcd.hdc, &cb, DFC_BUTTON,
+                                    DFCS_BUTTONCHECK |
+                                        (lpX->IsCheckedAt(static_cast<int>(
+                                             lpnmcd->nmcd.dwItemSpec))
+                                             ? DFCS_CHECKED
+                                             : 0));
+                            }
+                        }
                         // review-07 X-14 (v2.10): skip the risk tints under
                         // high-contrast themes — fixed warm colours on an
                         // unpredictable background can be unreadable; the
@@ -1131,7 +1172,12 @@ LRESULT CALLBACK RootsDlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     if (pidl) {
                         wchar_t buf[MAX_PATH]{};
                         if (SHGetPathFromIDListW(pidl, buf) && buf[0]) {
-                            HWND edit = GetDlgItem(h, 1);
+                            // R-2 (review r6-04/06/07, triple-confirmed):
+                            // this was GetDlgItem(h, 1) — the IDOK button,
+                            // not the edit (id 1001 since round-4 R-1) —
+                            // so "浏览添加…" appended to the WRONG window
+                            // and silently did nothing.
+                            HWND edit = GetDlgItem(h, 1001);
                             int len = GetWindowTextLengthW(edit);
                             if (len > 0) {
                                 SendMessageW(edit, EM_SETSEL, len, len);
@@ -1217,12 +1263,18 @@ void MainWindow::OnDevCacheRoots() {
     SetFocus(edit);
 
     MSG msg;
-    while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL got = 0;
+    while (IsWindow(dlg) && (got = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         if (!IsDialogMessageW(dlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+    // R-1 (review r6-04, P1): a WM_QUIT arriving while this hand-rolled
+    // pump runs (e.g. -takeover closing the app mid-dialog) was consumed
+    // here and never re-posted — the process zombied on with its main
+    // window gone. Forward it so the outer loop exits too.
+    if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam));
     EnableWindow(hwnd_, TRUE);
     SetActiveWindow(hwnd_);
 
@@ -1536,7 +1588,11 @@ void MainWindow::UpdateSearchStatus() {
                              VolumeIndex::ValidVolumeCount()));
         }
     } else {
-        ShowHint(FormatW(L"匹配 %s 项（索引共 %s 项，最多显示前 1,000）。",
+        // r6-07 P2: the one-line match count permanently displaced the
+        // page's usage hints — compose them (the owner-drawn strip gives
+        // line 1 the summary styling).
+        ShowHint(FormatW(L"匹配 %s 项（索引共 %s 项，最多显示前 1,000）。\n"
+                         L"双击定位文件；勾选后可移入隔离区（可还原）。",
                          FormatCount(shown).c_str(),
                          FormatCount(total).c_str()));
     }

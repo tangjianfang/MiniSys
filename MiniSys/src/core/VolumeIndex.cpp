@@ -151,6 +151,7 @@ void VolumeIndex::ResetForTesting() {
     entryCount_.store(0, std::memory_order_release);
     ready_ = false;
     walkBuilt_ = false;
+    dirtySinceSave_ = false;
     drive_ = 0;
     volumeSerial_ = 0;
     journalId_ = 0;
@@ -289,7 +290,16 @@ bool VolumeIndex::EnsureBuilt(wchar_t drive,
                 // Same volume — try an incremental refresh (M3) before
                 // considering a rebuild.
                 if (RefreshFromUsn(cancel)) {
-                    SaveCacheIfWorthwhile();
+                    // B-1 (review r6-03, P0): for walk-built indexes
+                    // RefreshFromUsn is a no-op "true" — the unconditional
+                    // save below rewrote the whole 267 MB cache on EVERY
+                    // scan and idle maintenance with zero changes (measured
+                    // 0.9 s CPU + full-disk write on a nearly-full C:).
+                    // Only journal-delta mutations need a re-save.
+                    if (dirtySinceSave_) {
+                        SaveCacheIfWorthwhile();
+                        dirtySinceSave_ = false;
+                    }
                     return true;
                 }
                 valid_.store(false, std::memory_order_release);
@@ -813,6 +823,7 @@ bool VolumeIndex::ApplyChanges(const std::vector<Change>& changes) {
     }
     Finalize();
     entryCount_.store(nodes_.size(), std::memory_order_release);
+    dirtySinceSave_ = true;   // B-1: journal deltas mutated the tree
     return true;
 }
 

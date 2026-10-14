@@ -11,15 +11,20 @@ namespace minisys {
 
 namespace {
 
-// "Administrators + SYSTEM, full; everyone else: nothing." The elevated app
-// can read/write; a standard user cannot even read the value.
-constexpr const wchar_t* kSddl = L"D:P(A;;GA;;;BA)(A;;GA;;;SY)";
+// v2.20 (review r6-05 T-B1 + r6-06): the record-signing secret moved HKLM →
+// HKCU. History records live in the user's AppData, so a per-user key is
+// the correct scope; more importantly, since v2.17 the app defaults to
+// asInvoker (unelevated) and the old admin-ACL'd HKLM value became
+// unreadable in the default context — combined with the missing HMAC flag
+// below, the signing chain had been dead since v2.14 (93 field records,
+// zero signatures). No migration: those records were never signable.
+// HKCU needs no explicit SDDL — the per-user hive is already protected.
 constexpr const wchar_t* kKeyPath = L"SOFTWARE\\MiniSys";
 constexpr const wchar_t* kValueName = L"RecordKey";
 
 bool ReadSecret(std::vector<uint8_t>& out) {
     HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kKeyPath, 0, KEY_READ, &k) !=
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kKeyPath, 0, KEY_READ, &k) !=
         ERROR_SUCCESS) {
         return false;
     }
@@ -38,21 +43,13 @@ bool ReadSecret(std::vector<uint8_t>& out) {
 }
 
 bool WriteSecret(const std::vector<uint8_t>& secret) {
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            kSddl, SDDL_REVISION_1, &sd, nullptr)) {
-        return false;
-    }
-    sa.lpSecurityDescriptor = sd;
     HKEY k = nullptr;
     DWORD disp = 0;
-    LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kKeyPath, 0, nullptr,
-                             REG_OPTION_NON_VOLATILE, KEY_WRITE, &sa, &k,
-                             &disp);
-    LocalFree(sd);
-    if (r != ERROR_SUCCESS) return false;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kKeyPath, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &k,
+                        &disp) != ERROR_SUCCESS) {
+        return false;
+    }
     bool ok = RegSetValueExW(k, kValueName, 0, REG_BINARY, secret.data(),
                              static_cast<DWORD>(secret.size())) == ERROR_SUCCESS;
     RegCloseKey(k);
@@ -76,8 +73,13 @@ std::vector<uint8_t> GetOrCreateMachineSecret() {
 HmacSha256::HmacSha256(const std::vector<uint8_t>& secret) {
     if (secret.empty()) return;
     BCRYPT_ALG_HANDLE alg = nullptr;
+    // T-B1 (review r6-05, SEVERE · driver-confirmed): the HMAC flag was
+    // missing here — without BCRYPT_ALG_HANDLE_HMAC_FLAG on the OPEN,
+    // BCryptCreateHash rejects pbSecret with 0xC000000D every time, so
+    // EVERY HMAC since v2.14 returned empty and no record was ever
+    // signed (field data: 93 records, 0 signatures).
     if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr,
-                                    0) != 0) {
+                                    BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0) {
         return;
     }
     ULONG objLen = 0, got = 0;

@@ -341,6 +341,15 @@ bool SessionService::StartTask(TaskKind kind, std::function<void()> body) {
 }
 
 bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
+    if (IsBusy()) {
+        // B-3 (review r6-03): same preemption as SearchAsync — a user scan
+        // outranks the idle maintenance.
+        if (maintenanceActive_.load()) {
+            cancelScan_.store(true);
+            SetProgress(L"空闲维护取消中，稍候自动开始扫描…");
+        }
+        return false;
+    }
     SetProgress(L"扫描中…");
     HWND hwnd = hwnd_;
     // std::function requires copyable targets — hold the move-only scanner
@@ -411,6 +420,13 @@ bool SessionService::IdleMaintenanceAsync() {
     SetProgress(L"空闲维护：增量刷新索引…");
     HWND hwnd = hwnd_;
     return StartTask(TaskKind::Verifying, [this, hwnd]() {
+        // B-3 (review r6-03, P0): mark the maintenance so interactive
+        // tasks know a busy worker is PREEMPTIBLE (exception-safe reset).
+        struct FlagReset {
+            std::atomic<bool>& f;
+            ~FlagReset() { f.store(false); }
+        } flagGuard{maintenanceActive_};
+        maintenanceActive_.store(true);
         // 1) journal deltas for every built volume (cheap by design —
         // EnsureBuilt revalidates serial + reads only new USN records).
         // v2.13a: WALK-built volumes have no journal — refresh them with a
@@ -497,7 +513,16 @@ bool SessionService::IdleMaintenanceAsync() {
 bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
     MS_LOG_INFO(L"SearchAsync enter: busy=%d query='%s'",
                 IsBusy() ? 1 : 0, query.c_str());
-    if (IsBusy()) return false;
+    if (IsBusy()) {
+        // B-3 (review r6-03, P0): a running idle maintenance (minutes-long
+        // re-walk) must not head-of-line-block a keystroke search — cancel
+        // it so the 80 ms retry converges in seconds instead of minutes.
+        if (maintenanceActive_.load()) {
+            cancelScan_.store(true);
+            SetProgress(L"空闲维护取消中，稍候自动继续搜索…");
+        }
+        return false;
+    }
     SetProgress(query.empty() ? L"搜索" : L"搜索: " + query);
     HWND hwnd = hwnd_;
     return StartTask(TaskKind::Searching, [this, query, matchPath, hwnd]() {
@@ -568,6 +593,10 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
             }
         }
         size_t total = VolumeIndex::TotalEntries();
+        // B-6a (review r6-03): the count used to be re-read via Results()
+        // AFTER the move — a full 1000-row vector copy, twice, per
+        // keystroke search. Capture it before the move instead.
+        size_t hitCount = items.size();
         StoreResults(TabId::Search, std::move(items));
         // v2.9: persist the search results (throttled — a search runs per
         // keystroke) so the next session reopens straight into them, query
@@ -587,12 +616,11 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
         SetProgress(cancelScan_.load()
             ? L"搜索已取消（有新输入）"
             : FormatW(L"匹配 %s 项（索引共 %s 项）",
-                      FormatCountSimple(
-                          Results(TabId::Search).size()).c_str(),
+                      FormatCountSimple(hitCount).c_str(),
                       FormatCountSimple(total).c_str()));
-        MS_LOG_INFO(L"Search worker body done: hits=%zu", Results(TabId::Search).size());
+        MS_LOG_INFO(L"Search worker body done: hits=%zu", hitCount);
         MS_LOG_INFO(L"Search done: query='%s' hits=%zu indexTotal=%zu",
-                    query.c_str(), Results(TabId::Search).size(), total);
+                    query.c_str(), hitCount, total);
         Post(hwnd, WM_APP_SEARCH_DONE);
     });
     return true;

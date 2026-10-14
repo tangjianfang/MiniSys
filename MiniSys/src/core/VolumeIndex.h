@@ -202,6 +202,10 @@ private:
     bool ready_ = false;   // lookups built — synthetic test indexes too (worker-only)
     bool walkBuilt_ = false;   // v2.6: filesystem-walk fallback index (worker-only)
     bool forceFullNext_ = false;   // v2.10: Invalidate() → skip cache, BuildFull
+    // B-1 (review r6-03, P0): set when journal deltas mutated the tree since
+    // the last cache save — EnsureBuilt must not rewrite the 267 MB file
+    // when nothing changed (walk-built volumes hit that path on every scan).
+    bool dirtySinceSave_ = false;
     wchar_t drive_ = 0;
     uint64_t volumeSerial_ = 0;
     uint64_t journalId_ = 0;

@@ -218,6 +218,15 @@ void ListTabPresenter::OnCheckFlipped(int row, bool checked) {
     checkStateByPath_[ToLower(snapshot_[row].path.wstring())] = checked;
 }
 
+// X-41 (review r6-07, P0): the authoritative check state for the
+// owner-drawn glyph — mirrors SupplyDispInfo's LVIF_STATE answer.
+bool ListTabPresenter::IsCheckedAt(int row) const {
+    if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return false;
+    auto key = ToLower(snapshot_[static_cast<size_t>(row)].path.wstring());
+    auto it = checkStateByPath_.find(key);
+    return it != checkStateByPath_.end() && it->second;
+}
+
 bool ListTabPresenter::ToggleCheckAt(int row) {
     if (row < 0 || static_cast<size_t>(row) >= snapshot_.size()) return false;
     auto key = ToLower(snapshot_[row].path.wstring());

@@ -230,8 +230,11 @@ TEST(DelegateWhitelist, BypassAttemptsDenied) {
 // ---- v2.14: signed records & guarded Finalize (review-05 T-A1/T-A3) ---------
 
 TEST(TrustChain, HmacContract) {
-    // Unelevated test processes cannot read the admin secret — the API
-    // degrades to "unsigned", which is itself the contract.
+    // v2.20: with the per-user (HKCU) secret and the fixed HMAC flag this
+    // now exercises the REAL path — before, the unelevated test process
+    // could not read the admin secret, the early-return below made the
+    // whole test vacuous, and the broken BCryptOpenAlgorithmProvider call
+    // hid underneath it (93 field records, 0 signatures).
     auto secret = GetOrCreateMachineSecret();
     if (secret.empty()) {
         EXPECT_TRUE(HmacSha256Hex(secret, L"x").empty());
@@ -244,10 +247,13 @@ TEST(TrustChain, HmacContract) {
     EXPECT_EQ(a, b);       // deterministic
     EXPECT_NE(a, c);       // input-sensitive
     EXPECT_EQ(a.size(), 64u);   // SHA-256 hex
-    // Streaming == one-shot.
+    // Streaming == one-shot (v2.20: the old comparison streamed NARROW
+    // bytes while the one-shot hashed the WIDE buffer — internally
+    // inconsistent, and never executed because of the vacuous early
+    // return above).
     HmacSha256 h(secret);
-    h.Update("hel", 3);
-    h.Update("lo", 2);
+    h.Update(L"hel", 6);
+    h.Update(L"lo", 4);
     auto mac = h.Finish();
     std::wstring hex;
     const wchar_t* digits = L"0123456789abcdef";
@@ -255,9 +261,12 @@ TEST(TrustChain, HmacContract) {
     EXPECT_EQ(hex, a);
 }
 
-TEST(TrustChain, UnsignedRecordsAreNotVerifiable_Unelevated) {
-    // In unelevated contexts records stay unsigned (secret unavailable);
-    // undo then refuses them — display-only by design.
+TEST(TrustChain, AppendSignsRecordsAndTamperBreaksSignature) {
+    // v2.20: replaces UnsignedRecordsAreNotVerifiable_Unelevated, which
+    // asserted the BROKEN behavior (sig stays empty unelevated) and so
+    // hid the dead signing chain (T-B1).
+    auto secret = GetOrCreateMachineSecret();
+    if (secret.empty()) return;   // no secret in this environment
     OpRecord r;
     r.id = OperationLog::NewId();
     r.source = L"C:\\some\\file.txt";
@@ -265,15 +274,96 @@ TEST(TrustChain, UnsignedRecordsAreNotVerifiable_Unelevated) {
     r.status = OpStatus::Success;
     OperationLog::Instance().Append(r);
     auto recs = OperationLog::Instance().LoadAll();
-    ASSERT_FALSE(recs.empty());
-    bool found = false;
+    const OpRecord* mine = nullptr;
     for (const auto& loaded : recs) {
-        if (loaded.id == r.id) { found = true; EXPECT_FALSE(loaded.sig.empty() == false); }
+        if (loaded.id == r.id) mine = &loaded;
     }
-    EXPECT_TRUE(found);
-    if (GetOrCreateMachineSecret().empty()) {
-        EXPECT_FALSE(OperationLog::VerifySignature(recs[0]));
+    ASSERT_NE(mine, nullptr);
+    EXPECT_FALSE(mine->sig.empty()) << "Append must sign when a secret exists";
+    EXPECT_TRUE(OperationLog::VerifySignature(*mine));
+
+    OpRecord tampered = *mine;
+    tampered.source += L"x";
+    EXPECT_FALSE(OperationLog::VerifySignature(tampered));
+}
+
+TEST(TrustChain, SignUnsignedLegacyQuarantineBoundary) {
+    // v2.20 (T-B2/T-B3): adoption signs only records whose target sits
+    // DIRECTLY under a real X:\MiniSys.Quarantine root AND exists on disk.
+    // The old compare(3,17) never matched (dead code); a naive prefix fix
+    // would admit "...\MiniSys.Quarantine-evil\..." siblings.
+    auto secret = GetOrCreateMachineSecret();
+    if (secret.empty()) return;
+
+    // Legacy records must reach the file UNSIGNED — Append signs now, so
+    // write raw JSONL into a dedicated history override.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path root = fs::path(L"C:\\MiniSys.Quarantine");
+    fs::path legit = root / L"__minisys_unit_test__";
+    fs::path evilRoot = fs::path(L"C:\\MiniSys.Quarantine-evil");
+    fs::path evilFile = evilRoot / L"b.txt";
+    fs::create_directories(root, ec);
+    fs::create_directories(evilRoot, ec);
+    {
+        std::ofstream f(legit, std::ios::binary); f << "x";
+        std::ofstream g(evilFile, std::ios::binary); g << "x";
     }
+    bool legitOk = fs::exists(legit, ec) && !ec;
+    bool evilOk = fs::exists(evilFile, ec) && !ec;
+    if (!legitOk || !evilOk) return;   // locked-down machine — can't test adoption
+
+    auto tempDir = fs::temp_directory_path(ec);
+    fs::path hist = tempDir / L"minisys-trustchain-boundary.jsonl";
+    auto rec = [](const wchar_t* id, const wchar_t* target) {
+        std::wstring t = target;
+        std::wstring escaped;
+        for (wchar_t ch : t) {
+            escaped += (ch == L'\\') ? L"\\\\" : std::wstring(1, ch);
+        }
+        return std::wstring(L"{\"id\":\"") + id +
+               L"\",\"timestamp\":\"2026-01-01 00:00:00\","
+               L"\"type\":\"QUARANTINE\",\"status\":\"SUCCESS\","
+               L"\"size\":1,\"reversible\":true,"
+               L"\"source\":\"C:\\\\src\\\\f.txt\",\"target\":\"" + escaped +
+               L"\",\"note\":\"\"}";
+    };
+    {
+        std::ofstream f(hist, std::ios::binary | std::ios::trunc);
+        f << WideToUtf8(rec(L"t_good", legit.wstring().c_str())) << "\n";
+        f << WideToUtf8(rec(L"t_evil", L"C:\\MiniSys.Quarantine-evil\\b.txt"))
+          << "\n";
+        f << WideToUtf8(rec(L"t_other", L"C:\\Windows\\Temp\\c.txt")) << "\n";
+    }
+    OperationLog::SetHistoryPathForTesting(hist);
+
+    size_t signed_n = OperationLog::Instance().SignUnsignedLegacy();
+    EXPECT_EQ(signed_n, 1u) << "only the real-root, existing target may be adopted";
+    auto recs = OperationLog::Instance().LoadAll();
+    auto findRec = [&](const wchar_t* id) -> const OpRecord* {
+        for (const auto& loaded : recs) {
+            if (loaded.id == id) return &loaded;
+        }
+        return nullptr;
+    };
+    const OpRecord* g = findRec(L"t_good");
+    const OpRecord* e = findRec(L"t_evil");
+    const OpRecord* w = findRec(L"t_other");
+    // Restore BEFORE asserting — a failed ASSERT must not leak the
+    // history override into later suites.
+    OperationLog::SetHistoryPathForTesting({});
+    fs::remove(legit, ec);
+    fs::remove(evilFile, ec);
+    fs::remove(evilRoot, ec);
+    fs::remove(hist, ec);
+
+    ASSERT_NE(g, nullptr);
+    EXPECT_FALSE(g->sig.empty());
+    EXPECT_TRUE(OperationLog::VerifySignature(*g));
+    ASSERT_NE(e, nullptr);
+    EXPECT_TRUE(e->sig.empty()) << "sibling-prefix target must be rejected";
+    ASSERT_NE(w, nullptr);
+    EXPECT_TRUE(w->sig.empty()) << "non-quarantine target must be rejected";
 }
 
 TEST(TrustChain, FinalizeCycleGuardTerminates) {

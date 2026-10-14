@@ -77,6 +77,10 @@ public:
     void SetAllChecked(bool on);
     // v2.15: record a user check-flip from the virtual control into the map.
     void OnCheckFlipped(int row, bool checked);
+    // X-41 (review r6-07, P0): read one row's check state — the source the
+    // owner-drawn checkbox glyph paints from (the comctl6 owner-data list
+    // never paints the state-image slot itself).
+    bool IsCheckedAt(int row) const;
     // v2.15: toggle one row's check; returns the NEW state (drives the
     // state-icon click / Space paths for virtual lists).
     bool ToggleCheckAt(int row);

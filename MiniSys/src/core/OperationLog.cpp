@@ -94,6 +94,18 @@ std::wstring SignedFieldsOf(const OpRecord& r) {
            OperationLog::StatusToStr(r.status);
 }
 
+// v2.20 (review r6-05 T-B2/T-B3): structural check — the target sits
+// directly under an "X:\MiniSys.Quarantine" root. The old inline
+// compare(3, 17) matched a 17-char substring against the 18-char literal
+// — never equal, so "信任并签名旧记录" has been dead code since v2.14.
+// The boundary clause rejects evil siblings ("...\MiniSys.Quarantine-evil\…").
+bool IsUnderQuarantineRoot(const std::wstring& targetLower) {
+    return targetLower.size() >= 21 && targetLower[1] == L':' &&
+           targetLower[2] == L'\\' &&
+           targetLower.compare(3, 18, L"minisys.quarantine") == 0 &&
+           (targetLower.size() == 21 || targetLower[21] == L'\\');
+}
+
 Json RecordToJson(const OpRecord& r) {
     Json j = Json::Object();
     j.Set(L"id", Json(r.id));
@@ -259,10 +271,12 @@ size_t OperationLog::SignUnsignedLegacy() {
     for (auto& r : all) {
         if (!r.sig.empty()) continue;
         std::wstring t = ToLower(r.target);
-        // X:\MiniSys.Quarantine\… — structural check only; adoption is an
-        // explicit admin action so this is the trust anchor for old rows.
-        if (t.size() >= 21 && t[1] == L':' &&
-            t.compare(3, 17, L"minisys.quarantine") == 0) {
+        // Structural check (T-B2: was dead code — see IsUnderQuarantineRoot)
+        // plus a T-B3 hardening clause: the quarantine target must actually
+        // exist on disk, so a forged history.jsonl cannot be adopted
+        // wholesale by pointing records at made-up paths.
+        if (IsUnderQuarantineRoot(t) &&
+            std::filesystem::exists(std::filesystem::path(r.target))) {
             r.sig = HmacSha256Hex(secret, SignedFieldsOf(r));
             ++n;
         }
@@ -282,10 +296,17 @@ void OperationLog::UpdateStatus(const std::wstring& id, OpStatus status,
     // rewrite. Load and rewrite now share one critical section.
     std::vector<OpRecord> oldestFirst = LoadAllLocked();
     std::reverse(oldestFirst.begin(), oldestFirst.end());
+    auto secret = GetOrCreateMachineSecret();
     for (auto& r : oldestFirst) {
         if (r.id == id) {
             r.status = status;
             if (!note.empty()) r.note = note;
+            // T-B4 (review r6-05): status/note are SIGNED fields — leaving
+            // the old signature made every status-flipped record display
+            // “未签名” and fail verification. Re-sign the touched record.
+            if (!r.sig.empty() && !secret.empty()) {
+                r.sig = HmacSha256Hex(secret, SignedFieldsOf(r));
+            }
         }
     }
     RewriteAtomic(JsonlPath(), oldestFirst);
@@ -298,11 +319,17 @@ void OperationLog::UpdateStatusBulk(const std::vector<std::wstring>& ids,
     std::lock_guard<std::mutex> g(mu_);
     std::vector<OpRecord> oldestFirst = LoadAllLocked();
     std::reverse(oldestFirst.begin(), oldestFirst.end());
+    auto secret = GetOrCreateMachineSecret();
     for (auto& r : oldestFirst) {
         for (const auto& id : ids) {
             if (r.id == id) {
                 r.status = status;
                 if (!note.empty()) r.note = note;
+                // T-B4: re-sign — status/note are covered fields (see
+                // UpdateStatus).
+                if (!r.sig.empty() && !secret.empty()) {
+                    r.sig = HmacSha256Hex(secret, SignedFieldsOf(r));
+                }
                 break;
             }
         }
