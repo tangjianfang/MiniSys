@@ -75,6 +75,8 @@ public:
     bool SupplyDispInfo(NMLVDISPINFOW* di) override;
     // v2.15: set every row's check (Ctrl+A / menu) without a message storm.
     void SetAllChecked(bool on);
+    // v2.22: 反选 — flip every row's check (context menu / Ctrl+I).
+    void InvertChecked();
     // v2.15: record a user check-flip from the virtual control into the map.
     void OnCheckFlipped(int row, bool checked);
     // X-41 (review r6-07, P0): read one row's check state — the source the

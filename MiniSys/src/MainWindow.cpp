@@ -117,6 +117,70 @@ HFONT BoldUiFont(HWND ctl) {
     return bold;
 }
 
+// v2.22 (user request: "table 栏也要支持样式区分"): owner-drawn tab strip.
+// The v2.19 bold-only selected state still read as "same style" — now the
+// selected page is a WHITE chip with an ACCENT underline and accent bold
+// text; unselected tabs sit quiet on the chrome. Flat, consistent with
+// the single-accent language.
+void DrawTabItem(const DRAWITEMSTRUCT& dis) {
+    wchar_t text[64] = {};
+    TCITEMW ti{};
+    ti.mask = TCIF_TEXT;
+    ti.pszText = text;
+    ti.cchTextMax = 64;
+    if (SendMessageW(dis.hwndItem, TCM_GETITEMW, dis.itemID,
+                     reinterpret_cast<LPARAM>(&ti)) == FALSE) {
+        return;
+    }
+    bool selected = (dis.itemState & ODS_SELECTED) != 0;
+    bool focused = (dis.itemState & ODS_FOCUS) != 0;
+    HDC dc = dis.hDC;
+    RECT rc = dis.rcItem;
+
+    HIGHCONTRASTW hct{ sizeof(hct) };
+    bool hcOn = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hct),
+                                      &hct, 0) &&
+                (hct.dwFlags & HCF_HIGHCONTRASTON);
+
+    if (selected) {
+        if (hcOn) {
+            FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+        } else {
+            FillRect(dc, &rc,
+                     reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            RECT bar = rc;
+            bar.top = rc.bottom - UiScale(dis.hwndItem, 3);
+            HBRUSH ab = CreateSolidBrush(RGB(0x00, 0x67, 0xC0));
+            FillRect(dc, &bar, ab);
+            DeleteObject(ab);
+        }
+    } else {
+        FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    }
+
+    SetBkMode(dc, TRANSPARENT);
+    if (selected) {
+        HFONT bold = BoldUiFont(dis.hwndItem);
+        if (bold) SelectObject(dc, bold);
+    } else {
+        HFONT base = reinterpret_cast<HFONT>(
+            SendMessageW(dis.hwndItem, WM_GETFONT, 0, 0));
+        if (base) SelectObject(dc, base);
+    }
+    SetTextColor(dc, hcOn ? GetSysColor(COLOR_WINDOWTEXT)
+                : selected ? RGB(0x00, 0x5A, 0xB4)   // accent, darker for text
+                           : RGB(0x44, 0x44, 0x48));
+    RECT tr = rc;
+    DrawTextW(dc, text, -1, &tr,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX |
+                  DT_END_ELLIPSIS);
+    if (focused) {
+        RECT fr = rc;
+        InflateRect(&fr, -3, -2);
+        DrawFocusRect(dc, &fr);
+    }
+}
+
 // v2.21 (简洁美观): the window's SINGLE accent — the 执行 primary button.
 // Accent fill, white bold label, 5px radius; everything else on the
 // chrome stays neutral so this is the one saturated element (design
@@ -297,6 +361,7 @@ int MainWindow::RunMessageLoop() {
     ACCEL acc[] = {
         { FVIRTKEY, VK_F5,      IDC_BTN_SCAN },
         { FVIRTKEY | FCONTROL, 'A', IDC_ACCEL_SELECTALL },
+        { FVIRTKEY | FCONTROL, 'I', IDM_LIST_INVERT },   // v2.22: 反选
         { FVIRTKEY | FCONTROL, 'K', IDC_ACCEL_PALETTE },   // v2.10 命令面板
     };
     HACCEL hAccel = CreateAcceleratorTableW(acc, 3);
@@ -390,6 +455,11 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
+            if (dis->CtlType == ODT_TAB) {
+                // v2.22: owner-drawn tab strip (see DrawTabItem).
+                DrawTabItem(*dis);
+                return TRUE;
+            }
             if (dis->CtlType == ODT_BUTTON &&
                 dis->CtlID == IDC_BTN_EXECUTE) {
                 // v2.21: accent primary button (see DrawPrimaryButton).
@@ -408,23 +478,6 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             auto nm = reinterpret_cast<LPNMHDR>(lp);
             if (nm->hwndFrom == h_.tab && nm->code == TCN_SELCHANGE) {
                 OnTabChanged();
-            } else if (nm->hwndFrom == h_.tab && nm->code == NM_CUSTOMDRAW) {
-                // v2.19 (user image #8 “选择 table 标签之后很不明显”): the
-                // selected tab was visually identical to its neighbours.
-                // Classic recipe: swap in a BOLD font for the selected item
-                // at ITEMPREPAINT (+ the wider TCM_SETPADDING set in
-                // CreateControls so the bold text doesn't clip).
-                auto* cd = reinterpret_cast<LPNMCUSTOMDRAW>(lp);
-                if (cd->dwDrawStage == CDDS_PREPAINT) {
-                    return CDRF_NOTIFYITEMDRAW;
-                }
-                if (cd->dwDrawStage == CDDS_ITEMPREPAINT &&
-                    (cd->uItemState & CDIS_SELECTED)) {
-                    HFONT bold = BoldUiFont(h_.tab);
-                    if (bold) SelectObject(cd->hdc, bold);
-                    return CDRF_NEWFONT;
-                }
-                return CDRF_DODEFAULT;
             } else if (nm->hwndFrom == h_.list &&
                        nm->code == LVN_ITEMCHANGED &&
                        taskMode_ == TaskMode::None) {
@@ -696,6 +749,20 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     if (auto* lp2 =
                             dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
                         lp2->SetAllChecked(on);
+                    }
+                    UpdateExecButton();
+                    break;
+                }
+                case IDM_LIST_INVERT: {
+                    // v2.22 (user request): 反选 — same map semantics.
+                    if (HWND focus = GetFocus()) {   // mirror Ctrl+A's edit guard
+                        wchar_t cls[8] = {};
+                        GetClassNameW(focus, cls, 8);
+                        if (wcscmp(cls, L"Edit") == 0) break;
+                    }
+                    if (auto* lp2 =
+                            dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+                        lp2->InvertChecked();
                     }
                     UpdateExecButton();
                     break;
@@ -1139,6 +1206,12 @@ void MainWindow::OnCommandPalette() {
     add(searchTab ? L"重建索引" : L"扫描当前页（F5）", [this] { OnScan(); });
     add(L"刷新列表 — 移除已手动删除的项", [this] { OnVerifyList(true); });
     add(L"全选 / 全不选切换（Ctrl+A）", [this] { OnSelectAll(); });
+    add(L"反选 — 勾选 ↔ 未勾选（Ctrl+I）", [this] {
+        if (auto* lp = dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+            lp->InvertChecked();
+            UpdateExecButton();
+        }
+    });
     add(L"预览执行 — 安全闸检查", [this] { OnPreviewExecution(); });
     add(L"清空隔离区…", [this] { OnEmptyQuarantine(); });
     add(L"关于 MiniSys", [this] { OnAbout(); });
@@ -2325,6 +2398,7 @@ void MainWindow::OnListContextMenu() {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTALL,  L"全选\tCtrl+A");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTNONE, L"全不选");
+    AppendMenuW(hMenu, MF_STRING, IDM_LIST_INVERT,     L"反选\tCtrl+I");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_PREVIEW,    L"预览执行（安全闸检查）…");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_EXCLUDE,    L"永不清理此项目");

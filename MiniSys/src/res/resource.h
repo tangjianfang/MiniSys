@@ -87,3 +87,4 @@
 #define IDM_QF_DOC          3023   // ext:doc;docx;xls;xlsx;pdf
 #define IDM_QF_CLEAR        3024   // strip all filter tokens
 #define IDM_LIST_VERIFY     3025   // v2.7: verify rows, drop hand-deleted
+#define IDM_LIST_INVERT     3026   // v2.22: invert checkbox selection (Ctrl+I)

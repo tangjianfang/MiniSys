@@ -249,6 +249,20 @@ void ListTabPresenter::SetAllChecked(bool on) {
     UpdateWindow(ui_.list);
 }
 
+// v2.22 (user request): 反选 — flip every row; unseen paths follow the
+// same default semantics as ToggleCheckAt (negate `recommended`).
+void ListTabPresenter::InvertChecked() {
+    for (const auto& it : snapshot_) {
+        auto key = ToLower(it.path.wstring());
+        auto cur = checkStateByPath_.find(key);
+        bool now = (cur == checkStateByPath_.end()) ? !it.recommended
+                                                    : !cur->second;
+        checkStateByPath_[key] = now;
+    }
+    ListView_RedrawItems(ui_.list, 0, ListView_GetItemCount(ui_.list) - 1);
+    UpdateWindow(ui_.list);
+}
+
 namespace {
 
 // REVIEW-UI P0 (L-2): shared column header/width switcher (free function —

@@ -12,11 +12,15 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.main = parent;
 
     h.tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP |
+            TCS_OWNERDRAWFIXED,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_TABCTRL), inst, nullptr);
     // v2.19 (user image #8): wider item padding so the BOLD selected-tab
-    // text (NM_CUSTOMDRAW in MainWindow) doesn't clip against its
-    // neighbour — the default 6px was cut for the bold advance width.
+    // text doesn't clip against its neighbour — the default 6px was cut
+    // for the bold advance width.
+    // v2.22: the strip is owner-drawn now (MainWindow DrawTabItem) —
+    // selected = white chip + accent underline + accent bold text, which
+    // finally reads as a real STYLE change (bold alone did not).
     SendMessageW(h.tab, TCM_SETPADDING, 0, MAKELPARAM(UiScale(parent, 11), 3));
 
     // review-07 X-1: WS_TABSTOP on the list/tree (and the settings edits
