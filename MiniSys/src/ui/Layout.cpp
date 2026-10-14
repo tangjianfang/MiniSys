@@ -51,20 +51,37 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     SetWindowPos(ui.about, nullptr, W - Scale(84, dpi), 1, Scale(80, dpi), tabH - 2, SWP_NOZORDER);
 
     int btnY = tabH + pad;
-    SetWindowPos(ui.scan,        nullptr, pad,                     btnY, btnW, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.exec,        nullptr, pad + btnW + pad,        btnY, btnW + 20, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.undo,        nullptr, pad + 2*(btnW + pad)+20, btnY, btnW + 20, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.emptyQ,      nullptr, pad + 3*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.open,        nullptr, pad + 3*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.targetBtn,   nullptr, pad + 4*(btnW + pad)+40, btnY, btnW + 40, btnH, SWP_NOZORDER);
-    // REVIEW-UI P1 (L-4/X-16): right-anchored — the fixed x=828+w=360
-    // overflowed the default 1100px window's client area.
-    {
-        int advW = Scale(240, dpi);
-        SetWindowPos(ui.advancedChk, nullptr, W - pad - advW, btnY, advW, btnH, SWP_NOZORDER);
-    }
-    SetWindowPos(ui.btnSortSize, nullptr, pad + 4*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
-    SetWindowPos(ui.btnSortTime, nullptr, pad + 5*(btnW + pad)+40, btnY, btnW, btnH, SWP_NOZORDER);
+    // v2.21 (简洁美观): two clean groups on a strict 8px grid — ACTIONS
+    // anchored left (scan → exec, then the tab-specific extras), UTILITIES
+    // anchored right (打开所在位置, and on Apps the 高级模式 checkbox left
+    // of it). The old fixed-x chain left-packed everything and stranded a
+    // dead zone on the right; the 按大小/按时间排序 duplicates of the
+    // column-header sorting are gone entirely.
+    const int scanW = Scale(96, dpi);
+    const int execW = Scale(204, dpi);   // fits “执行选中操作（1000 项·1.31 GB）”
+    const int undoW = Scale(150, dpi);
+    const int emptyW = Scale(124, dpi);
+    const int openW = Scale(124, dpi);
+    const int targetW = Scale(170, dpi);
+    const int advW = Scale(160, dpi);
+    int lx = pad;                                    // left group cursor
+    SetWindowPos(ui.scan,      nullptr, lx, btnY, scanW, btnH, SWP_NOZORDER);
+    lx += scanW + pad;
+    SetWindowPos(ui.exec,      nullptr, lx, btnY, execW, btnH, SWP_NOZORDER);
+    lx += execW + pad;
+    SetWindowPos(ui.targetBtn, nullptr, lx, btnY, targetW, btnH, SWP_NOZORDER);
+    // History composition: [撤销][清空隔离区] from the left edge.
+    SetWindowPos(ui.undo,   nullptr, pad, btnY, undoW, btnH, SWP_NOZORDER);
+    SetWindowPos(ui.emptyQ, nullptr, pad + undoW + pad, btnY, emptyW,
+                 btnH, SWP_NOZORDER);
+    // Right group: [高级模式(Symlink)](Apps) [打开所在位置]
+    int rx = W - pad - openW;
+    SetWindowPos(ui.open, nullptr, rx, btnY, openW, btnH, SWP_NOZORDER);
+    // REVIEW-UI P1 (L-4/X-16): the Apps checkbox used to be a fixed
+    // x=828+w=360 that overflowed the 1100px client — right-anchored next
+    // to the utility group now.
+    SetWindowPos(ui.advancedChk, nullptr, rx - pad - advW, btnY, advW, btnH,
+                 SWP_NOZORDER);
 
     // Settings/search row — rendered when LargeFiles or Search tab is
     // active (v2.3: the search box lives on the same row mechanism).
@@ -76,20 +93,20 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     if (showSearch) {
         int sx = pad;
         SetWindowPos(ui.lblSearch,   nullptr, sx, settingsY + 1,
-                     Scale(46, dpi), lblH, SWP_NOZORDER);
-        sx += Scale(46, dpi) + 4;
-        // v2.6: [搜索框][快速筛选 ▾][匹配完整路径] — the quick-filter
-        // button squeezes in between the edit and the checkbox.
+                     Scale(44, dpi), lblH, SWP_NOZORDER);
+        sx += Scale(44, dpi) + pad;
+        // v2.6: [搜索框][快速筛选 ▾][匹配完整路径] — v2.21: uniform 8px
+        // gaps across the row (was a 4/6/6 mix).
         int chkW = Scale(146, dpi);
         int qfW  = Scale(104, dpi);
         int chkX = W - pad - chkW;
-        int qfX  = chkX - 6 - qfW;
+        int qfX  = chkX - pad - qfW;
         SetWindowPos(ui.chkMatchPath, nullptr, chkX, settingsY + 1,
                      chkW, lblH, SWP_NOZORDER);
         SetWindowPos(ui.btnQuickFilter, nullptr, qfX, settingsY,
                      qfW, editH, SWP_NOZORDER);
         SetWindowPos(ui.editSearch,  nullptr, sx, settingsY,
-                     qfX - 6 - sx, editH, SWP_NOZORDER);
+                     qfX - pad - sx, editH, SWP_NOZORDER);
     }
 
     if (showSettings) {
@@ -101,14 +118,14 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
         const int lblW3   = Scale(190, dpi);
         int sx = pad;
         SetWindowPos(ui.lblMinSize,     nullptr, sx,                  settingsY+1, lblW1, lblH, SWP_NOZORDER);
-        SetWindowPos(ui.editMinSize,    nullptr, sx+lblW1+4,          settingsY,   editW, editH, SWP_NOZORDER);
-        SetWindowPos(ui.lblMinSizeUnit, nullptr, sx+lblW1+4+editW+4,  settingsY+1, 28,   lblH, SWP_NOZORDER);
-        sx = sx + lblW1+4+editW+4+28+12;
+        SetWindowPos(ui.editMinSize,    nullptr, sx+lblW1+pad,        settingsY,   editW, editH, SWP_NOZORDER);
+        SetWindowPos(ui.lblMinSizeUnit, nullptr, sx+lblW1+pad+editW+pad, settingsY+1, 28, lblH, SWP_NOZORDER);
+        sx = sx + lblW1+pad+editW+pad+28+pad;
         SetWindowPos(ui.lblFileType,    nullptr, sx,                  settingsY+1, lblW2, lblH, SWP_NOZORDER);
-        SetWindowPos(ui.editFileType,   nullptr, sx+lblW2+4,          settingsY,   editW2, editH, SWP_NOZORDER);
-        sx = sx + lblW2+4+editW2+12;
+        SetWindowPos(ui.editFileType,   nullptr, sx+lblW2+pad,        settingsY,   editW2, editH, SWP_NOZORDER);
+        sx = sx + lblW2+pad+editW2+pad;
         SetWindowPos(ui.lblDrives,      nullptr, sx,                  settingsY+1, lblW3, lblH, SWP_NOZORDER);
-        SetWindowPos(ui.editDrives,     nullptr, sx+lblW3+4,          settingsY,   editW3, editH, SWP_NOZORDER);
+        SetWindowPos(ui.editDrives,     nullptr, sx+lblW3+pad,        settingsY,   editW3, editH, SWP_NOZORDER);
     }
 
     int infoY = btnY + btnH + pad + settingsRowH;
@@ -127,7 +144,9 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
             HDC dc = GetDC(ui.main);
             HGDIOBJ old = SelectObject(dc, reinterpret_cast<HGDIOBJ>(
                 SendMessageW(ui.info, WM_GETFONT, 0, 0)));
-            RECT rc{ 0, 0, W - 2 * pad - Scale(8, dpi), 0 };
+            // v2.21: the strip is a card now — measure inside its inner
+            // padding (8 left/right, DrawInfoText).
+            RECT rc{ 0, 0, W - 2 * pad - Scale(16, dpi), 0 };
             DrawTextW(dc, buf, len, &rc,
                       DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
             SelectObject(dc, old);
@@ -140,12 +159,13 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
             int lines = (rc.bottom + lineH - 1) / lineH;
             if (lines < 1) lines = 1;
             if (lines > 6) lines = 6;   // cap — extremely long hints fold
-            infoH = lines * lineH + Scale(8, dpi);
+            // v2.21: card vertical padding (4 top + 3 bottom).
+            infoH = lines * lineH + Scale(7, dpi);
         }
     }
     SetWindowPos(ui.info, nullptr, pad, infoY, W - 2*pad, infoH, SWP_NOZORDER);
 
-    int contentY = infoY + infoH + Scale(4, dpi);
+    int contentY = infoY + infoH + Scale(6, dpi);
     int contentH = H - contentY - statusH - pad;   // REVIEW-UI P1 (L-4b/X-16)
     SetWindowPos(ui.list, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);
     SetWindowPos(ui.tree, nullptr, pad, contentY, W - 2*pad, contentH, SWP_NOZORDER);

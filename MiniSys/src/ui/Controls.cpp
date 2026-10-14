@@ -33,6 +33,14 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     ListView_SetExtendedListViewStyle(h.list,
         LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
         LVS_EX_LABELTIP | LVS_EX_INFOTIP);
+    // v2.21 (简洁美观): airier rows — a report-view ListView's row height
+    // follows its small-image-list height. An empty 1px-wide list buys
+    // +5px of breathing room per row without shifting any text (no
+    // LVIF_IMAGE is ever served, so no icon slot is reserved).
+    if (HIMAGELIST himl = ImageList_Create(1, UiScale(parent, 22),
+                                            ILC_COLOR32, 1, 0)) {
+        ListView_SetImageList(h.list, himl, LVSIL_SMALL);
+    }
 
     LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
     col.fmt = LVCFMT_LEFT;
@@ -53,9 +61,11 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.scan = CreateWindowExW(0, L"BUTTON", L"扫描",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_SCAN), inst, nullptr);
-    // V-A6 (aesthetics): the PRIMARY action gets the default-button weight.
+    // v2.21 (简洁美观): the PRIMARY action is the window's single accent —
+    // owner-drawn (MainWindow DrawPrimaryButton) with an accent fill and
+    // white bold text; BS_DEFPUSHBUTTON's thin border said nothing.
     h.exec = CreateWindowExW(0, L"BUTTON", L"执行选中操作",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_EXECUTE), inst, nullptr);
     h.undo = CreateWindowExW(0, L"BUTTON", L"撤销选中(历史)",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -133,14 +143,6 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
                  reinterpret_cast<LPARAM>(
                      L"输入关键词，或点右侧“快速筛选”一键过滤"));
 
-    // ---- Sort buttons (shown for scan result tabs, hidden for History/FolderTree) ----
-    h.btnSortSize = CreateWindowExW(0, L"BUTTON", L"按大小排序",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_SORT_SIZE), inst, nullptr);
-    h.btnSortTime = CreateWindowExW(0, L"BUTTON", L"按时间排序",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_SORT_TIME), inst, nullptr);
-
     // ---- FolderTree TreeView ----
     h.tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
         WS_CHILD | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
@@ -163,8 +165,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
                       h.lblFileType, h.editFileType,
                       h.lblDrives, h.editDrives,
                       h.lblSearch, h.editSearch, h.chkMatchPath,
-                      h.btnQuickFilter,
-                      h.btnSortSize, h.btnSortTime, h.tree, h.about }) {
+                      h.btnQuickFilter, h.tree, h.about }) {
         SendMessageW(ctl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
 

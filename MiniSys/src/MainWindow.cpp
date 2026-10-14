@@ -117,6 +117,50 @@ HFONT BoldUiFont(HWND ctl) {
     return bold;
 }
 
+// v2.21 (简洁美观): the window's SINGLE accent — the 执行 primary button.
+// Accent fill, white bold label, 5px radius; everything else on the
+// chrome stays neutral so this is the one saturated element (design
+// rule: spend the boldness in one place).
+void DrawPrimaryButton(const DRAWITEMSTRUCT& dis) {
+    wchar_t text[160] = {};
+    GetWindowTextW(dis.hwndItem, text, 160);
+    bool disabled = (dis.itemState & ODS_DISABLED) != 0;
+    bool focused  = (dis.itemState & ODS_FOCUS) != 0;
+
+    HDC dc = dis.hDC;
+    RECT rc = dis.rcItem;
+    int r = UiScale(dis.hwndItem, 5);
+
+    COLORREF fill = disabled ? RGB(0xE4, 0xE4, 0xE8) : RGB(0x00, 0x67, 0xC0);
+    COLORREF edge = disabled ? RGB(0xC6, 0xC6, 0xCA) : RGB(0x00, 0x54, 0x9E);
+    HBRUSH br = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, edge);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBr = SelectObject(dc, br);
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, r, r);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBr);
+    DeleteObject(pen);
+    DeleteObject(br);
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, disabled ? RGB(0x8A, 0x8A, 0x8E) : RGB(0xFF, 0xFF, 0xFF));
+    HFONT bold = BoldUiFont(dis.hwndItem);
+    HGDIOBJ oldFont = bold ? SelectObject(dc, bold) : nullptr;
+    RECT tr = rc;
+    InflateRect(&tr, -UiScale(dis.hwndItem, 8), 0);
+    DrawTextW(dc, text, -1, &tr,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX |
+                  DT_END_ELLIPSIS);
+    if (oldFont) SelectObject(dc, oldFont);
+
+    if (focused) {
+        RECT fr = rc;
+        InflateRect(&fr, -3, -3);
+        DrawFocusRect(dc, &fr);
+    }
+}
+
 // v2.19 (user image #8 “UI上的文本没有排版”): owner-draw for the info
 // strip (IDC_LABEL_INFO). Typography a plain STATIC cannot do: the first
 // (summary) line bold + near-black, hint lines grey, ⚠-prefixed warning
@@ -128,13 +172,27 @@ void DrawInfoText(const DRAWITEMSTRUCT& dis) {
     std::wstring text(buf, static_cast<size_t>(len));
 
     HDC dc = dis.hDC;
+    // v2.21 (简洁美观): the strip renders as a quiet CARD — white surface
+    // with a hairline border, inset from the grey chrome. High-contrast
+    // themes keep the plain system surfaces (no card).
     // v2.19a FIX (live screenshot caught it): nothing erases an
     // SS_OWNERDRAW static between draws here (no WM_CTLCOLORSTATIC
     // handler), so a redraw after the text/height changed left the OLD
     // pixels under the new lines — early lines read as interleaved
     // garbage while the last line (never overlapped) stayed clean.
-    // Paint the slate ourselves, with the window-class brush.
-    FillRect(dc, &dis.rcItem, GetSysColorBrush(COLOR_BTNFACE));
+    // Paint the slate ourselves, every draw.
+    HIGHCONTRASTW hcard{ sizeof(hcard) };
+    bool cardHc = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hcard),
+                                        &hcard, 0) &&
+                  (hcard.dwFlags & HCF_HIGHCONTRASTON);
+    if (cardHc) {
+        FillRect(dc, &dis.rcItem, GetSysColorBrush(COLOR_BTNFACE));
+    } else {
+        FillRect(dc, &dis.rcItem,
+                 reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        static HBRUSH hairline = CreateSolidBrush(RGB(0xDC, 0xDC, 0xDE));
+        FrameRect(dc, &dis.rcItem, hairline);
+    }
 
     static int loggedDraws = 0;
     if (loggedDraws++ < 2) {
@@ -144,9 +202,10 @@ void DrawInfoText(const DRAWITEMSTRUCT& dis) {
     }
 
     RECT rc = dis.rcItem;
-    rc.left += 2;
-    rc.top += 1;
-    rc.right -= 2;
+    // card inner padding (v2.21)
+    rc.left += UiScale(dis.hwndItem, 8);
+    rc.top += UiScale(dis.hwndItem, 4);
+    rc.right -= UiScale(dis.hwndItem, 8);
 
     SetBkMode(dc, TRANSPARENT);
     // X-43 (review r6-07, P1): the fixed grey/amber text colours are
@@ -330,9 +389,15 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
+            if (dis->CtlType == ODT_BUTTON &&
+                dis->CtlID == IDC_BTN_EXECUTE) {
+                // v2.21: accent primary button (see DrawPrimaryButton).
+                DrawPrimaryButton(*dis);
+                return TRUE;
+            }
             // v2.19 (user image #8): the info strip is owner-drawn —
             // DrawInfoText provides the typography (see above).
-            auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
             if (dis->CtlType == ODT_STATIC && dis->CtlID == IDC_LABEL_INFO) {
                 DrawInfoText(*dis);
                 return TRUE;
@@ -574,12 +639,6 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_BTN_OPENLOC: OnOpenLocation(); break;
                 case IDC_BTN_EMPTY_Q: OnEmptyQuarantine(); break;
                 case IDC_BTN_CHOOSE_TARGET: OnChooseTarget(); break;
-                case IDC_BTN_SORT_SIZE:
-                    if (auto* p = ActivePresenter()) p->SortBySize();
-                    break;
-                case IDC_BTN_SORT_TIME:
-                    if (auto* p = ActivePresenter()) p->SortByTime();
-                    break;
                 case IDC_BTN_ABOUT:
                     OnAbout();
                     break;
@@ -1398,10 +1457,9 @@ void MainWindow::OnTabChanged() {
         ShowWindow(h, isLargeFiles ? SW_SHOW : SW_HIDE);
     }
 
-    // Sort buttons (only on scan result tabs that have a sortable list, not Apps)
-    bool showSort = isScanTab && !isApps;
-    ShowWindow(h_.btnSortSize, showSort ? SW_SHOW : SW_HIDE);
-    ShowWindow(h_.btnSortTime, showSort ? SW_SHOW : SW_HIDE);
+    // v2.21 (简洁美观): the 按大小/按时间排序 toolbar buttons are GONE —
+    // they duplicated the (arrow-annotated) column-header sorting that the
+    // hint text already teaches; the row reads far cleaner without them.
 
     // Content areas
     ShowWindow(h_.list, !isFolderTree ? SW_SHOW : SW_HIDE);
@@ -1699,7 +1757,7 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     // same read-only-browsing reasoning as verify/preview in v2.8).
     // REVIEW-UI P1 (04-2): editSearch/chkMatchPath join the matrix.
     bool lockBrowse = (mode == TaskMode::Scanning || mode == TaskMode::Executing);
-    for (HWND h : { h_.list, h_.tree, h_.btnSortSize, h_.btnSortTime }) {
+    for (HWND h : { h_.list, h_.tree }) {
         if (h) EnableWindow(h, lockBrowse ? FALSE : TRUE);
     }
     for (HWND h : { h_.exec, h_.undo, h_.emptyQ, h_.open,

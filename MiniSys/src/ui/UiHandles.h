@@ -32,8 +32,6 @@ struct UiHandles {
     HWND chkMatchPath = nullptr; // v2.3: match full path toggle
     HWND lblSearch = nullptr;    // v2.3: "搜索:" label
     HWND btnQuickFilter = nullptr; // v2.6: quick-filter preset menu button
-    HWND btnSortSize = nullptr;  // sort buttons
-    HWND btnSortTime = nullptr;
     HWND about = nullptr;        // 关于 button (always visible, right-aligned)
 };
 
