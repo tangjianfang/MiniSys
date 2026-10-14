@@ -459,6 +459,27 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     case CDDS_PREPAINT:
                         return CDRF_NOTIFYITEMDRAW;
                     case CDDS_ITEMPREPAINT: {
+                        // v2.21a (简洁美观): zebra rows — a whisper of tint
+                        // on odd rows so long dense lists scan by pairing.
+                        // Selected rows keep their highlight and
+                        // high-contrast themes skip the tint entirely.
+                        if (!(lpnmcd->nmcd.uItemState & CDIS_SELECTED)) {
+                            HIGHCONTRASTW hcz{ sizeof(hcz) };
+                            bool zebraHc =
+                                SystemParametersInfoW(SPI_GETHIGHCONTRAST,
+                                                      sizeof(hcz), &hcz, 0) &&
+                                (hcz.dwFlags & HCF_HIGHCONTRASTON);
+                            if (!zebraHc &&
+                                (lpnmcd->nmcd.dwItemSpec & 1) == 1) {
+                                RECT zr = lpnmcd->nmcd.rc;
+                                if (zr.right > zr.left) {
+                                    HBRUSH zb = CreateSolidBrush(
+                                        RGB(0xF6, 0xF8, 0xFA));
+                                    FillRect(lpnmcd->nmcd.hdc, &zr, zb);
+                                    DeleteObject(zb);
+                                }
+                            }
+                        }
                         // X-41 (review r6-07, P0 · pixel-verified): with
                         // LVS_OWNERDATA the comctl6 ListView NEVER paints
                         // the state-image slot even though LVN_GETDISPINFO
@@ -1476,13 +1497,13 @@ void MainWindow::OnTabChanged() {
     switch (t) {
         case TabId::Junk:
             tabInfoText_ =
-                L"扫描系统/浏览器/开发缓存等可清理项；勾选后执行将移入隔离区，可在“操作历史”一键还原。\n"
+                L"扫描系统/浏览器/开发缓存等可清理项；勾选后执行将移入隔离区，可在“操作历史”一键还原；点列标题排序。\n"
                 L"· 含程序员构建缓存（bin/obj/.vs/ipch/x64 等，仅限项目目录内；24 小时内编译过的跳过）。\n"
                 L"⚠ 危险项（清空回收站、WinSxS 等）默认不勾选；“清空隔离区”后才真正释放空间。";
             break;
         case TabId::Search:
             tabInfoText_ =
-                L"输入即搜（多词为“并且”，支持 * ? 通配符，Enter 立即刷新）；双击定位文件，勾选后可移入隔离区。\n"
+                L"输入即搜（多词为“并且”，支持 * ? 通配符，Enter 立即刷新）；双击定位文件，勾选后可移入隔离区；点列标题排序。\n"
                 L"· 点“快速筛选”一键过滤：.pdb / .obj / Debug 文件夹等；手动过滤词：folder: / file: / ext:cpp;h。\n"
                 L"ℹ 范围：所有固定磁盘的文件索引；上次的搜索词与结果会原样恢复；系统空闲时自动增量维护。";
             break;
