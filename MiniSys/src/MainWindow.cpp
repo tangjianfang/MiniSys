@@ -373,7 +373,13 @@ int MainWindow::RunMessageLoop() {
         { FVIRTKEY | FCONTROL, 'I', IDM_LIST_INVERT },   // v2.22: 反选
         { FVIRTKEY | FCONTROL, 'K', IDC_ACCEL_PALETTE },   // v2.10 命令面板
     };
-    HACCEL hAccel = CreateAcceleratorTableW(acc, 3);
+    // r7 X-1 (U-3): v2.22 added Ctrl+I as the 4th entry but kept the
+    // hand-written count 3 — Ctrl+K (the command palette, the app's
+    // "zero-depth access" entry) silently died while About/empty-state
+    // text kept advertising it. Derive the count; never hand-write it again.
+    static_assert(sizeof(acc) / sizeof(acc[0]) == 4,
+                  "accelerator count drifted from the array");
+    HACCEL hAccel = CreateAcceleratorTableW(acc, ARRAYSIZE(acc));
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (hAccel && TranslateAcceleratorW(hwnd_, hAccel, &msg)) continue;
@@ -597,6 +603,14 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                                                   sizeof(hc), &hc, 0) &&
                             (hc.dwFlags & HCF_HIGHCONTRASTON)) {
                             return CDRF_DODEFAULT;
+                        }
+                        // v2.24 (r7 X-2): rows the presenter marks as dead
+                        // (history: [已释放] — permanently deleted) render in
+                        // grey so a cleaned quarantine reads at a glance.
+                        if (auto* pAny = ActivePresenter();
+                            pAny && pAny->RowIsDimmed(lpnmcd->nmcd.dwItemSpec)) {
+                            lpnmcd->clrText = GetSysColor(COLOR_GRAYTEXT);
+                            return CDRF_NEWFONT;
                         }
                         auto* p = dynamic_cast<ListTabPresenter*>(ActivePresenter());
                         const ScanItem* it = p ? p->ItemAtRow(
@@ -1736,8 +1750,28 @@ void MainWindow::OnScan() {
         ShowHint(L"ℹ 正在取消扫描…");
         return;
     }
+    // r7 X-9: executing was un-cancellable — a multi-minute DISM run or a
+    // 2.5 GB quarantine sweep locked every action with no way out.
+    if (svc.IsExecuting()) {
+        svc.CancelScan();
+        ShowHint(L"ℹ 正在取消——当前项完成后停止，剩余项将跳过（文件未改动）。");
+        return;
+    }
+    // r7 U-4: a lazy tree expansion is cancellable the same way.
+    if (svc.IsExpanding()) {
+        svc.CancelScan();
+        ShowHint(L"ℹ 正在取消文件夹展开…");
+        return;
+    }
     if (svc.IsBusy()) {
         ShowHint(L"ℹ 已有任务在进行中，请稍候。");
+        return;
+    }
+    // r7 X-10: F5 with the caret in the search box means "refresh
+    // results" (every browser's muscle memory), not "rebuild the whole
+    // index for a minute". Rebuild stays on the button/panel entry.
+    if (CurrentTab() == TabId::Search && GetFocus() == h_.editSearch) {
+        RunSearch();
         return;
     }
     auto scanner = ActivePresenter() ? ActivePresenter()->BuildScanner() : nullptr;
@@ -1801,20 +1835,33 @@ void MainWindow::OnScanDone() {
     auto& svc = SessionService::Instance();
     SetTaskBusy(TaskMode::None);
 
-    auto t = CurrentTab();
-    if (auto* p = ActivePresenter()) p->OnScanDone();
+    // r7 X-5: compose for the tab the scan STARTED on. During a 20 s scan
+    // the user often switches pages — v2.23 then wrote the origin tab's
+    // dashboard (or a bogus "系统状况良好") onto whatever page happened to
+    // be visible, and the origin tab never saw its own result. Background
+    // tabs refresh from Results() when the user switches to them.
+    TabId t = svc.LastScanTab();
+    const bool onScanTab = (t == CurrentTab());
+    if (onScanTab && ActivePresenter()) ActivePresenter()->OnScanDone();
     // v2.3: after an index build, re-apply the pending search query.
     if (t == TabId::Search) {
-        if (VolumeIndex::AnyValid()) {
+        if (onScanTab && VolumeIndex::AnyValid()) {
             // v2.6: never auto-fire an empty search (it blanked the list
             // right after the index finished building).
             wchar_t buf[512] = {};
             GetWindowTextW(h_.editSearch, buf, 512);
             if (buf[0]) RunSearch();   // REVIEW-UI P1: worker-side re-filter
             else UpdateSearchStatus();
-        } else {
+        } else if (onScanTab) {
             UpdateSearchStatus();
         }
+        UpdateStatusBar();
+        UpdateExecButton();
+        return;
+    }
+    if (!onScanTab) {
+        // The finished scan belongs to a background tab — leave the info
+        // area to the page the user is looking at.
         UpdateStatusBar();
         UpdateExecButton();
         return;
@@ -1824,7 +1871,10 @@ void MainWindow::OnScanDone() {
     // then degradation notices, then the static tab description. The old
     // "append to the tail" order put the notices below the 3-line fold.
     std::wstring composed;
-    if (t != TabId::History && svc.Results(t).empty()) {
+    if (svc.LastScanIncomplete()) {
+        // r7-08 T3: cancelled / interrupted scans are never "状况良好".
+        composed += L"ℹ 扫描已取消或中断（结果不完整）——点「扫描」重新开始。\n";
+    } else if (t != TabId::History && svc.Results(t).empty()) {
         composed += L"✓ 未发现可处理项，系统状况良好。\n";
     }
 
@@ -1893,8 +1943,15 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     // review-07 X-12: Indexing doesn't touch results_ either — the cached
     // lists stay browsable/sortable/checkable while the index builds (the
     // same read-only-browsing reasoning as verify/preview in v2.8).
-    // REVIEW-UI P1 (04-2): editSearch/chkMatchPath join the matrix.
-    bool lockBrowse = (mode == TaskMode::Scanning || mode == TaskMode::Executing);
+    // r7-02 U-5: Scanning joins Indexing — RunScan accumulates into a
+    // worker-local buffer and moves it into results_ once, under the lock,
+    // at completion; browsing/switching during a 20 s scan can't race it.
+    // Locking the whole UI for the scan's duration ("everything frozen,
+    // is it hung?") was the single largest perceived-lag complaint.
+    bool lockBrowse = (mode == TaskMode::Executing);
+    // r7 X-9: Executing offers Cancel too (RunPlan/undo/empty-quarantine
+    // stop at the next item boundary).
+    bool cancellable = scanning || mode == TaskMode::Executing;
     for (HWND h : { h_.list, h_.tree }) {
         if (h) EnableWindow(h, lockBrowse ? FALSE : TRUE);
     }
@@ -1903,13 +1960,13 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
                     h_.editSearch, h_.chkMatchPath, h_.btnQuickFilter }) {
         if (h) EnableWindow(h, scanning ? FALSE : (busy ? FALSE : TRUE));
     }
-    EnableWindow(h_.tab, mode == TaskMode::Indexing ? TRUE : (busy ? FALSE : TRUE));
-    EnableWindow(h_.scan, scanning ? TRUE : (busy ? FALSE : TRUE));
+    EnableWindow(h_.tab, busy && !scanning ? FALSE : TRUE);
+    EnableWindow(h_.scan, cancellable ? TRUE : (busy ? FALSE : TRUE));
     // REVIEW-UI P1 (L-25): on the search tab the button means "rebuild
     // index", not "scan".
     bool searchTab = (CurrentTab() == TabId::Search);
-    SetWindowTextW(h_.scan, scanning ? L"取消"
-                                     : (searchTab ? L"重建索引" : L"扫描"));
+    SetWindowTextW(h_.scan, cancellable ? L"取消"
+                                        : (searchTab ? L"重建索引" : L"扫描"));
     // V-A7 (aesthetics): a window-level busy state — the title carries it
     // even when the status pane is off-screen.
     {
@@ -1925,9 +1982,9 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
     // v2.5 (L-22, live-confirmed): while the button means CANCEL it must not
     // keep the magnifying-glass icon — swap to the red ✕ (this SDK has no
     // SIID_STOP; SIID_DELETE's glyph is the standard cancel cross) and back.
-    if (scanning != scanIconIsStop_) {
-        icons::SetStockButtonIcon(h_.scan, scanning ? SIID_DELETE : SIID_FIND);
-        scanIconIsStop_ = scanning;
+    if (cancellable != scanIconIsStop_) {
+        icons::SetStockButtonIcon(h_.scan, cancellable ? SIID_DELETE : SIID_FIND);
+        scanIconIsStop_ = cancellable;
     }
 
     if (mode == TaskMode::None) {
@@ -2219,6 +2276,13 @@ void MainWindow::OnPlanDone() {
     std::wstring info = FormatW(L"✓ 完成: 成功 %d · 跳过 %d · 失败 %d",
                                 rpt.succeeded, rpt.skipped, rpt.failed);
     if (!line.empty()) info += L" — " + line;
+    // r7-08 T8: every outcome names the NEXT action — "成功 24 · 失败 1"
+    // alone leaves the user wondering what to do about the 1.
+    if (rpt.failed > 0) {
+        info += L"\n→ 失败项已保留勾选：关闭占用它的程序后可直接再次执行；详情见下方弹窗。";
+    } else if (rpt.quarantinedBytes > 0) {
+        info += L"\n→ 可在「操作历史」一键还原；“清空隔离区”后才真正释放空间。";
+    }
     ShowHint(info);
 
     // A modal dialog appears only when something needs attention:
@@ -2432,6 +2496,29 @@ void MainWindow::OnListContextMenu() {
     if (t == TabId::History || t == TabId::FolderTree) return;
     DWORD pos = GetMessagePos();
     POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
+
+    // r7 X-6: right-click acts on the row UNDER the cursor. v2.23 ran the
+    // commands against the current SELECTION instead — right-clicking row
+    // B while row A was selected quietly did something to A. The folder
+    // tree already did this; the list is now held to the same standard.
+    {
+        POINT lv = pt;
+        ScreenToClient(h_.list, &lv);
+        LVHITTESTINFO ht{ };
+        ht.pt = lv;
+        ListView_SubItemHitTest(h_.list, &ht);
+        if (ht.iItem >= 0) {
+            ListView_SetItemState(h_.list, -1, 0,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_SetItemState(h_.list, ht.iItem,
+                                  LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+            UpdateWindow(h_.list);
+        }
+        // No row hit (blank area): fall through with the selection as-is —
+        // the list-style selection commands below are still meaningful.
+    }
+
     HMENU hMenu = CreatePopupMenu();
     // REVIEW-UI P2 (L-15): the Enter shortcut hint is only true on the
     // search tab (Enter activates the row → locate). "此文件夹" was wrong

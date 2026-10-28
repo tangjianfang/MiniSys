@@ -214,5 +214,55 @@ TEST_F(VolumeIndexTest, HugeChangeSetRejected) {
     EXPECT_FALSE(idx.ApplyChangesForTesting(many));   // full rebuild is cheaper
 }
 
+// v2.24 (r7 U-15): the app's OWN 快速筛选 presets emit "folder:debug" —
+// which the v2.23 parser treated as literal free text (0 hits forever,
+// the trigger for a pointless 49 s index rebuild). Pin the value-carrying
+// forms, the bare forms, and ext: list parsing.
+TEST(VolumeIndexQuery, ParseFilterTermsForms) {
+    std::wstring freeQ;
+
+    auto f = VolumeIndex::ParseFilterTerms(L"folder:debug", freeQ);
+    EXPECT_TRUE(f.dirsOnly);
+    EXPECT_FALSE(f.filesOnly);
+    EXPECT_EQ(freeQ, L"debug");
+    EXPECT_TRUE(f.exts.empty());
+
+    f = VolumeIndex::ParseFilterTerms(L"folder:", freeQ);
+    EXPECT_TRUE(f.dirsOnly);
+    EXPECT_EQ(freeQ, L"");
+
+    f = VolumeIndex::ParseFilterTerms(L"DIR:release", freeQ);
+    EXPECT_TRUE(f.dirsOnly);
+    EXPECT_EQ(freeQ, L"release");
+
+    f = VolumeIndex::ParseFilterTerms(L"file:readme", freeQ);
+    EXPECT_TRUE(f.filesOnly);
+    EXPECT_EQ(freeQ, L"readme");
+
+    f = VolumeIndex::ParseFilterTerms(L"is:folder", freeQ);
+    EXPECT_TRUE(f.dirsOnly);
+    EXPECT_EQ(freeQ, L"");
+
+    // Combined: preset output appended to an existing query.
+    f = VolumeIndex::ParseFilterTerms(L"ext:pdb folder:debug", freeQ);
+    EXPECT_TRUE(f.dirsOnly);
+    ASSERT_EQ(f.exts.size(), 1u);
+    EXPECT_EQ(f.exts[0], L"pdb");
+    EXPECT_EQ(freeQ, L"debug");
+
+    // ext lists + leading-dot normalization + separators.
+    f = VolumeIndex::ParseFilterTerms(L"ext:.cpp;h|obj", freeQ);
+    ASSERT_EQ(f.exts.size(), 3u);
+    EXPECT_EQ(f.exts[0], L"cpp");
+    EXPECT_EQ(f.exts[1], L"h");
+    EXPECT_EQ(f.exts[2], L"obj");
+
+    // Plain words stay free text; nothing else flips.
+    f = VolumeIndex::ParseFilterTerms(L"myfolder notes", freeQ);
+    EXPECT_FALSE(f.dirsOnly);
+    EXPECT_FALSE(f.filesOnly);
+    EXPECT_EQ(freeQ, L"myfolder notes");
+}
+
 } // namespace
 } // namespace minisys

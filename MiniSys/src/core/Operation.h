@@ -13,6 +13,7 @@ enum class OpType {
     MoveFilePath,
     Quarantine,        // v2: same-volume rename into the quarantine area
     Delegate,          // v2 (M3): delegated to a system command (DISM/powercfg/…)
+    EmptyQuarantine,   // v2.24 (r7-08 T2): audit row — 清空隔离区 itself
 };
 
 enum class OpStatus { Pending, Success, Failed, Reverted, Interrupted };

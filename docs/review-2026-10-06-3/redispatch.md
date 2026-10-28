@@ -34,3 +34,4 @@
 用户数据 %LOCALAPPDATA%\MiniSys 只读;分报告写
 C:\Users\tjf\AppData\Local\Temp\minisys-review-20261011\。
 应用可能正在运行(勿动进程;标准输出目录被锁时构建到其他 OutDir)。
+rotate.ps1 excluded from review blacklist (it launches the app by user directive 2026-10-12)

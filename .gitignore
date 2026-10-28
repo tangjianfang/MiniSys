@@ -32,3 +32,6 @@ minisys-shot.png
 minisys-2*.png
 shot-2*.png
 build/Latest/
+.tmp-review/
+.tmp-shots/
+build/

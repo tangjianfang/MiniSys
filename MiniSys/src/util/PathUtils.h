@@ -44,6 +44,17 @@ bool EmptyRecycleBinAll(); // shows no UI, no sound, no confirmation
 bool FileExists(const std::filesystem::path& p);
 bool DirExists(const std::filesystem::path& p);
 
+// r7-04 U-1: best-effort recursive deletion that survives Win32-illegal
+// leaf names (trailing dots/spaces — plain DeleteFileW gets err 2 on them,
+// and fs::remove_all then reports the WHOLE root as failed while leaving
+// everything else deleted). Enumerates with FindFirstFileW and deletes
+// through \\?\-prefixed paths; never recurses into reparse points (same
+// safety property as fs::remove_all — verified r7-05). Returns the number
+// of entries that could not be deleted; their \\?\-prefixed paths land in
+// *survivors (optional). A root that does not exist is a no-op (0).
+size_t RemoveAllLongPath(const std::wstring& root,
+                         std::vector<std::wstring>* survivors = nullptr);
+
 // Whether a directory entry is a reparse point (junction / symlink).
 bool IsReparsePoint(const std::filesystem::path& p);
 

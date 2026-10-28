@@ -84,6 +84,18 @@ PathPolicy& Policy() {
         sub(pol.fileSubtree, root, L"System Volume Information");
         sub(pol.fileSubtree, root, L"$WinREAgent");
         sub(pol.fileSubtree, root, L"Recovery");
+        // r7-05 B2: boot/volume files at the drive root were policy-free —
+        // the only thing stopping a quarantined pagefile.sys was a locked
+        // file's failed attribute query (an accidental defence), and
+        // bootmgr/BCD on BIOS machines had nothing at all.
+        exact(pol.fileExact, fs::path(root) / L"pagefile.sys");
+        exact(pol.fileExact, fs::path(root) / L"hiberfil.sys");
+        exact(pol.fileExact, fs::path(root) / L"swapfile.sys");
+        exact(pol.fileExact, fs::path(root) / L"bootmgr");
+        exact(pol.fileExact, fs::path(root) / L"BOOTSECT.BAK");
+        sub(pol.fileSubtree, root, L"Boot");
+        sub(pol.fileSubtree, root, L"Config.Msi");
+        sub(pol.fileSubtree, root, L"MSOCache");
         for (const auto& drive : EnumerateDrives()) {
             sub(pol.fileSubtree, drive, L"MiniSys.Quarantine");
         }
@@ -262,12 +274,42 @@ bool GuardRails::Canonicalize(const std::wstring& in, std::wstring& out) {
         std::error_code ec;
         for (; cur != cur.root_path(); cur = cur.parent_path()) {
             if (fs::exists(cur, ec)) {
-                wchar_t lb[MAX_PATH * 2];
-                DWORD ln = GetLongPathNameW(cur.wstring().c_str(), lb,
-                                            MAX_PATH * 2);
-                if (ln > 0 && ln < MAX_PATH * 2 &&
-                    _wcsicmp(lb, cur.wstring().c_str()) != 0) {
-                    out = std::wstring(lb) + tail;
+                // r7-05 B3: GetLongPathNameW does NOT resolve reparse
+                // points — an ancestor that is a junction to C:\Windows
+                // kept the LINK's spelling, so "...\link\newdir" (tail
+                // nonexistent) sailed past the subtree lists. Resolve the
+                // ancestor by traversing links (no OPEN_REPARSE_POINT) and
+                // asking the object manager where we actually landed.
+                wchar_t fb[MAX_PATH * 2];
+                HANDLE ah = CreateFileW(cur.wstring().c_str(), 0,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                            FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                DWORD fn = (ah != INVALID_HANDLE_VALUE)
+                               ? GetFinalPathNameByHandleW(ah, fb,
+                                                           MAX_PATH * 2,
+                                                           FILE_VOLUME_NAME_DOS)
+                               : 0;
+                bool resolved = false;
+                if (ah != INVALID_HANDLE_VALUE) CloseHandle(ah);
+                if (fn > 0 && fn < MAX_PATH * 2) {
+                    std::wstring final(fb, fn);
+                    StripPrefix(final);
+                    if (!final.empty()) {
+                        out = final + tail;
+                        resolved = true;
+                    }
+                }
+                if (!resolved) {
+                    // Legacy behaviour (8.3 expansion) as the fallback.
+                    wchar_t lb[MAX_PATH * 2];
+                    DWORD ln = GetLongPathNameW(cur.wstring().c_str(), lb,
+                                                MAX_PATH * 2);
+                    if (ln > 0 && ln < MAX_PATH * 2 &&
+                        _wcsicmp(lb, cur.wstring().c_str()) != 0) {
+                        out = std::wstring(lb) + tail;
+                    }
                 }
                 break;
             }

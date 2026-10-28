@@ -373,6 +373,8 @@ bool SessionService::StartScan(TabId tab, std::unique_ptr<Scanner> scanner) {
     // std::function requires copyable targets — hold the move-only scanner
     // via shared_ptr.
     auto holder = std::shared_ptr<Scanner>(std::move(scanner));
+    lastScanTab_.store(static_cast<int>(tab));
+    lastScanIncomplete_.store(false);
     return StartTask(TaskKind::Scanning, [this, tab, holder, hwnd]() {
         RunScan(tab, holder, hwnd);
     });
@@ -383,6 +385,8 @@ bool SessionService::BuildIndexAsync(bool forceRebuild) {
     SetProgress(forceRebuild ? L"重建文件索引（全量，所有固定磁盘）…"
                              : L"构建文件索引（所有固定磁盘）…");
     HWND hwnd = hwnd_;
+    lastScanTab_.store(static_cast<int>(TabId::Search));
+    lastScanIncomplete_.store(false);
     bool ok = StartTask(TaskKind::Scanning, [this, forceRebuild, hwnd]() {
         // v2.11 (磁盘瘦身助手): index EVERY fixed drive, not just the
         // system volume — search covers all disks now.
@@ -553,6 +557,12 @@ bool SessionService::FolderChildrenAsync(const std::wstring& dir) {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
                 std::filesystem::path kid = std::filesystem::path(dir) / n;
+                // r7 U-4/T5: progress + cancel BEFORE each (potentially
+                // minutes-long) subtree size — the static "展开文件夹…"
+                // with no cancel made big expansions look like a hang that
+                // also blocked every other action.
+                SetProgress(FormatW(L"展开 %zu: %s", items.size() + 1, n));
+                if (cancelScan_.load()) break;
                 ScanItem item;
                 item.category  = dir;        // same linkage convention as FolderTreeScanner
                 item.title     = n;
@@ -699,6 +709,7 @@ bool SessionService::SearchAsync(const std::wstring& query, bool matchPath) {
 
 void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND hwnd) {    std::vector<ScanItem> buffer;
     auto t0 = std::chrono::steady_clock::now();
+    bool threw = false;
     try {
         scanner->Scan(buffer,
             [this, hwnd](unsigned long long done, unsigned long long total,
@@ -714,10 +725,16 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
             },
             cancelScan_);
     } catch (const std::exception& ex) {
+        threw = true;
         MS_LOG_ERROR(L"Scanner threw: %hs", ex.what());
     } catch (...) {
+        threw = true;
         MS_LOG_ERROR(L"Scanner threw unknown exception");
     }
+    // r7-08 T3: a cancelled / crashed scan must not be reported as a
+    // completed, healthy one — the info card used to greet partial
+    // results with "✓ 未发现可处理项，系统状况良好".
+    lastScanIncomplete_.store(threw || cancelScan_.load());
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     {
@@ -733,8 +750,11 @@ void SessionService::RunScan(TabId tab, std::shared_ptr<Scanner> scanner, HWND h
                     static_cast<int>(tab),
                     results_[static_cast<size_t>(tab)].size(),
                     static_cast<long long>(ms));
-        SetProgress(FormatW(L"扫描完成: %zu 项",
-                            results_[static_cast<size_t>(tab)].size()));
+        SetProgress(lastScanIncomplete_.load()
+            ? FormatW(L"已取消/中断：结果不完整（%zu 项，未写入缓存）",
+                      results_[static_cast<size_t>(tab)].size())
+            : FormatW(L"扫描完成: %zu 项",
+                      results_[static_cast<size_t>(tab)].size()));
     }
     if (!cancelScan_.load()) {
         SaveResultsCache(tab);   // v2.5: persist for the next session
@@ -801,6 +821,15 @@ void SessionService::RunPlan(const CleanPlan plan, HWND hwnd) {
 
     for (const auto& pi : plan.items) {
         if (pi.itemIdx >= items.size()) continue;
+        // r7 X-9: executing is cancellable — the 取消 button stops here,
+        // between items; the rest are reported as skipped (their files
+        // untouched), never as executed.
+        if (cancelScan_.load()) {
+            rpt.skipped += total - done + 1;
+            rpt.details += FormatW(
+                L"⊘ 已取消：剩余 %d 项未执行（文件未改动）\n", total - done + 1);
+            break;
+        }
         const auto& si = items[pi.itemIdx];
         ++done;
         SetProgress(FormatW(L"执行 %d/%d: %s", done, total, si.title.c_str()));
@@ -917,62 +946,66 @@ bool SessionService::EmptyQuarantine() {
 }
 
 void SessionService::RunEmptyQuarantine(HWND hwnd) {
-    // REVIEW P1-7 (03-B7 / 05-T-B10): the old flow counted bytes even for
-    // drives that failed to empty, then marked EVERY record as released —
-    // the history lied while files were still on disk. Per-drive verdicts
-    // now decide which records get marked, and only their recorded sizes
-    // count as freed.
+    // r7-04 U-1 / r7-05 B-1: fs::remove_all reported the WHOLE drive as
+    // failed as soon as one Win32-illegal leaf name (a trailing-dot
+    // artifact, "tdot.") survived — everything else was already deleted,
+    // yet no record was ever marked released, so the history rows and the
+    // status-bar usage kept counting files that were gone for weeks (the
+    // user report: "清空隔离区后，下面的列表信息还未清空"). Now:
+    //   1. best-effort long-path deletion per drive, survivors reported;
+    //   2. bookkeeping follows DISK TRUTH — every quarantined record
+    //      whose target no longer exists becomes [已释放], which also
+    //      heals damage from earlier partial empties;
+    //   3. the action appends its own audit row.
     ExecuteReport rpt;
-    unsigned long long bytes = 0;
-    std::vector<wchar_t> emptiedDrives;
 
     for (const auto& drive : EnumerateDrives()) {
         fs::path root = fs::path(drive) / L"MiniSys.Quarantine";
         std::error_code ec;
         if (!fs::exists(root, ec)) continue;
-        fs::remove_all(root, ec);
-        if (ec) {
+        // r7 X-9: cancellable between drives; the disk-truth marking below
+        // stays correct for whatever was already emptied.
+        if (cancelScan_.load()) {
+            rpt.details += L"⊘ 已取消：部分磁盘的隔离区未清空（文件未改动）\n";
+            break;
+        }
+        std::vector<std::wstring> survivors;
+        RemoveAllLongPath(root.wstring(), &survivors);
+        if (survivors.empty()) {
+            ++rpt.succeeded;
+        } else {
             ++rpt.failed;
-            rpt.details += FormatW(L"× 清空 %s 失败: %hs（文件仍在，可稍后重试）\n",
-                                   root.wstring().c_str(), ec.message().c_str());
-            continue;
+            rpt.details += FormatW(
+                L"× 清空 %s 失败: %zu 项无法删除（文件仍在，可稍后重试）\n",
+                root.wstring().c_str(), survivors.size());
         }
-        ++rpt.succeeded;
-        emptiedDrives.push_back(drive.empty() ? L'\0' : drive[0]);
     }
 
-    // Mark only records whose quarantine target lived on an emptied drive;
-    // their recorded sizes are the actually-freed bytes.
-    if (!emptiedDrives.empty()) {
-        std::vector<std::wstring> releasedIds;
-        unsigned long long freed = 0;
-        for (const auto& r : OperationLog::Instance().LoadAll()) {
-            if (r.type != OpType::Quarantine || r.status != OpStatus::Success) continue;
-            if (r.note.rfind(L"[已释放]", 0) == 0) continue;   // already purged
-            if (r.target.empty() || r.target[1] != L':') continue;
-            wchar_t d = static_cast<wchar_t>(::towupper(r.target[0]));
-            bool onEmptied = false;
-            for (wchar_t e : emptiedDrives) {
-                if (::towupper(e) == d) { onEmptied = true; break; }
-            }
-            if (onEmptied) {
-                releasedIds.push_back(r.id);
-                freed += r.sizeBytes;
-            }
-        }
-        OperationLog::Instance().UpdateStatusBulk(
-            releasedIds, OpStatus::Success,
-            L"[已释放] 隔离区已清空，文件已永久删除");
-        bytes = freed;
-    }
+    // Disk-truth marking (also self-heals pre-v2.24 partial empties).
+    auto rec = OperationLog::Instance().MarkReleasedWhereTargetsGone();
+    rpt.freedBytes = rec.freedBytes;
 
-    rpt.freedBytes = bytes;
+    // The one irreversible action gets its own audit row (r7-08 T2③).
+    OpRecord audit;
+    audit.type         = OpType::EmptyQuarantine;
+    audit.id           = OperationLog::NewId();
+    audit.status       = rpt.failed > 0 ? OpStatus::Failed : OpStatus::Success;
+    audit.source       = L"隔离区（各盘 MiniSys.Quarantine）";
+    audit.sizeBytes    = rpt.freedBytes;
+    audit.isReversible = false;
+    audit.note = FormatW(L"%s释放 %s · %zu 条隔离记录标记为已释放",
+                         rpt.failed > 0 ? L"部分成功：" : L"",
+                         FormatSize(rpt.freedBytes).c_str(), rec.marked);
+    OperationLog::Instance().Append(audit);
+
     {
         std::lock_guard<std::mutex> g(reportMu_);
         lastReport_ = rpt;
     }
-    SetProgress(FormatW(L"隔离区已清空: 释放 %s",
-                        FormatSize(rpt.freedBytes).c_str()));
+    SetProgress(rpt.succeeded == 0 && rpt.failed == 0 && rec.marked == 0
+                    ? L"隔离区已是空的"
+                    : FormatW(L"隔离区已清空: 释放 %s",
+                              FormatSize(rpt.freedBytes).c_str()));
     Post(hwnd, WM_APP_OP_DONE);
 }
 
@@ -991,7 +1024,7 @@ std::wstring SessionService::QuarantineUsageText() const {
     unsigned long long count = 0;
     for (const auto& r : OperationLog::Instance().LoadAll()) {
         if (r.type != OpType::Quarantine || r.status != OpStatus::Success) continue;
-        if (r.note.rfind(L"[已释放]", 0) == 0) continue;   // already purged
+        if (OperationLog::IsReleased(r)) continue;   // already purged
         ++count;
         bytes += r.sizeBytes;
     }
@@ -1016,6 +1049,14 @@ bool SessionService::UndoRecordsAsync(const std::vector<OpRecord>& records) {
         ExecuteReport rpt;
         int done = 0;
         for (const auto& r : records) {
+            // r7 X-9: undo is cancellable between items, same as RunPlan.
+            if (cancelScan_.load()) {
+                rpt.skipped += static_cast<int>(records.size()) - done;
+                rpt.details += FormatW(
+                    L"⊘ 已取消：剩余 %zu 项未还原（文件未改动）\n",
+                    records.size() - done);
+                break;
+            }
             ++done;
             SetProgress(FormatW(L"撤销 %d/%zu: %s", done, records.size(),
                                 r.source.c_str()));
@@ -1062,6 +1103,12 @@ SessionService::UndoResult SessionService::UndoRecord(const OpRecord& rec,
         MS_LOG_WARN(L"Undo refused: record without valid signature: %s",
                     rec.id.c_str());
         errOut = L"记录缺少有效签名（可能被篡改或为旧版记录），已拒绝还原";
+        return UndoResult::NotReversible;
+    }
+    // v2.24 (r7 X-2b): released records are dead — the quarantine copy was
+    // permanently deleted; undo would only produce a guaranteed failure.
+    if (OperationLog::IsReleased(rec)) {
+        errOut = L"该项已随隔离区清空永久删除，无法还原";
         return UndoResult::NotReversible;
     }
     if (!rec.isReversible || rec.status != OpStatus::Success) {

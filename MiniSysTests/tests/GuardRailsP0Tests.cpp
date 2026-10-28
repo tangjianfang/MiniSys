@@ -75,6 +75,24 @@ TEST(GuardRailsP0, QuarantineRootsProtectedOnAllDrives) {
     }
 }
 
+TEST(GuardRailsP0, DriveRootBootAndVolumeFilesProtected) {
+    // r7-05 B2: pagefile/hiberfil/swapfile/bootmgr/Boot/Config.Msi/MSOCache
+    // were policy-free — the only thing stopping a quarantined pagefile was
+    // a locked file's failed attribute query (an accidental defence).
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\pagefile.sys"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\PAGEFILE.SYS"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\hiberfil.sys"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\swapfile.sys"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\bootmgr"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\Boot\\BCD"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\Boot\\zh-CN\\bootmgr.exe.mui"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\Config.Msi\\1234.rbs"));
+    EXPECT_TRUE(GuardRails::IsProtectedPath(L"C:\\MSOCache\\All Users\\data.dat"));
+    // Ordinary user files at the root stay allowed (the product's purpose).
+    EXPECT_FALSE(GuardRails::IsProtectedPath(L"C:\\MyStuff\\notes.txt"));
+    EXPECT_FALSE(GuardRails::IsProtectedPath(L"C:\\tmp\\f.bin"));
+}
+
 TEST(GuardRailsP0, BuiltInExemptedSystemCleanupSubtreesAllowed) {
     // T-B9: the six built-in Cautious rules + do-cache must be EXECUTABLE —
     // protected C:\Windows, but punched through by the exemption table.

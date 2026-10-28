@@ -12,19 +12,27 @@ namespace {
 int Scale(int v, UINT dpi) { return v * static_cast<int>(dpi) / 96; }
 
 UINT WindowDpi(HWND hwnd) {
-    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
-        if (hwnd) {
-            using Fn = UINT(WINAPI*)(HWND);
-            if (auto fn = reinterpret_cast<Fn>(GetProcAddress(user32, "GetDpiForWindow"))) {
-                return fn(hwnd);
-            }
-        } else {
-            // No window yet (initial CreateWindow size) — system DPI.
-            using FnS = UINT(WINAPI*)();
-            if (auto fn = reinterpret_cast<FnS>(GetProcAddress(user32, "GetDpiForSystem"))) {
-                return fn();
-            }
-        }
+    // r7-02 U-7: Resolve the import ONCE — GetModuleHandleW+GetProcAddress
+    // on every call measured 7.6 µs, paid per drawn row (checkbox glyph).
+    // WM_DPICHANGED moves a window across monitors; the cached function
+    // POINTER is stable, only its per-hwnd RESULT varies.
+    using Fn  = UINT(WINAPI*)(HWND);
+    using FnS = UINT(WINAPI*)();
+    static Fn  fnWin = [] {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        return user32 ? reinterpret_cast<Fn>(GetProcAddress(user32, "GetDpiForWindow"))
+                      : nullptr;
+    }();
+    static FnS fnSys = [] {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        return user32 ? reinterpret_cast<FnS>(GetProcAddress(user32, "GetDpiForSystem"))
+                      : nullptr;
+    }();
+    if (hwnd) {
+        if (fnWin) return fnWin(hwnd);
+    } else {
+        // No window yet (initial CreateWindow size) — system DPI.
+        if (fnSys) return fnSys();
     }
     return 96;
 }

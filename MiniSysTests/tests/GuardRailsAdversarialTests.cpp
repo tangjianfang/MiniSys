@@ -265,8 +265,23 @@ TEST(TrustChain, AppendSignsRecordsAndTamperBreaksSignature) {
     // v2.20: replaces UnsignedRecordsAreNotVerifiable_Unelevated, which
     // asserted the BROKEN behavior (sig stays empty unelevated) and so
     // hid the dead signing chain (T-B1).
+    // v2.24 (r7 U-5): this test used to Append into the REAL user
+    // history.jsonl — every test run since 2026-10-11 added a
+    // "C:\some\file.txt" ghost row to the app's history page. Redirect to
+    // a temp file first (same pattern as SignUnsignedLegacyQuarantineBoundary).
+    namespace fs = std::filesystem;
+    wchar_t tmpDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmpDir);
+    fs::path hist = fs::path(tmpDir) / L"minisys-tests" / L"append-sign.jsonl";
+    std::error_code ec;
+    fs::create_directories(hist.parent_path(), ec);
+    OperationLog::SetHistoryPathForTesting(hist);
+
     auto secret = GetOrCreateMachineSecret();
-    if (secret.empty()) return;   // no secret in this environment
+    if (secret.empty()) {
+        OperationLog::SetHistoryPathForTesting({});
+        return;   // no secret in this environment
+    }
     OpRecord r;
     r.id = OperationLog::NewId();
     r.source = L"C:\\some\\file.txt";
@@ -285,6 +300,8 @@ TEST(TrustChain, AppendSignsRecordsAndTamperBreaksSignature) {
     OpRecord tampered = *mine;
     tampered.source += L"x";
     EXPECT_FALSE(OperationLog::VerifySignature(tampered));
+
+    OperationLog::SetHistoryPathForTesting({});   // don't leak into later suites
 }
 
 TEST(TrustChain, SignUnsignedLegacyQuarantineBoundary) {
@@ -334,6 +351,11 @@ TEST(TrustChain, SignUnsignedLegacyQuarantineBoundary) {
         f << WideToUtf8(rec(L"t_evil", L"C:\\MiniSys.Quarantine-evil\\b.txt"))
           << "\n";
         f << WideToUtf8(rec(L"t_other", L"C:\\Windows\\Temp\\c.txt")) << "\n";
+        // r7-05 B4: two shapes that v2.20 still adopted — the root itself
+        // (undo would move the WHOLE quarantine away) and a dotdot escape.
+        f << WideToUtf8(rec(L"t_root", L"C:\\MiniSys.Quarantine")) << "\n";
+        f << WideToUtf8(rec(L"t_dotdot", L"C:\\MiniSys.Quarantine\\..\\esc"))
+          << "\n";
     }
     OperationLog::SetHistoryPathForTesting(hist);
 
@@ -349,6 +371,8 @@ TEST(TrustChain, SignUnsignedLegacyQuarantineBoundary) {
     const OpRecord* g = findRec(L"t_good");
     const OpRecord* e = findRec(L"t_evil");
     const OpRecord* w = findRec(L"t_other");
+    const OpRecord* rt = findRec(L"t_root");
+    const OpRecord* dd = findRec(L"t_dotdot");
     // Restore BEFORE asserting — a failed ASSERT must not leak the
     // history override into later suites.
     OperationLog::SetHistoryPathForTesting({});
@@ -364,6 +388,10 @@ TEST(TrustChain, SignUnsignedLegacyQuarantineBoundary) {
     EXPECT_TRUE(e->sig.empty()) << "sibling-prefix target must be rejected";
     ASSERT_NE(w, nullptr);
     EXPECT_TRUE(w->sig.empty()) << "non-quarantine target must be rejected";
+    ASSERT_NE(rt, nullptr);
+    EXPECT_TRUE(rt->sig.empty()) << "root-exact target must be rejected (B4)";
+    ASSERT_NE(dd, nullptr);
+    EXPECT_TRUE(dd->sig.empty()) << "dotdot-escape target must be rejected (B4)";
 }
 
 TEST(TrustChain, FinalizeCycleGuardTerminates) {

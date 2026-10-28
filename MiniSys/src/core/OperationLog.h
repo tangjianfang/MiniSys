@@ -34,6 +34,34 @@ public:
     // Load all records (newest first). Reads JSONL and legacy TSV lines.
     std::vector<OpRecord> LoadAll();
 
+    // v2.24 (r7 X-2): a quarantine record whose files were permanently
+    // deleted by 清空隔离区. The note starts with kReleasedNotePrefix and
+    // the label/risk columns, undo preflight, usage text and reconcile all
+    // consult THIS predicate — v2.23 had three call sites with three
+    // opinions and the history rows kept advertising "可还原" after the
+    // files were gone.
+    static constexpr const wchar_t* kReleasedNotePrefix = L"[已释放]";
+    static bool IsReleased(const OpRecord& r);
+
+    // v2.24 (r7-05 B4): true when `canonicalLowerTarget` sits STRICTLY
+    // inside an "x:\MiniSys.Quarantine\" root (≥1 real component, no ".."
+    // escapes, not the root itself). QuarantineOp::UndoPaths re-checks
+    // this before moving anything back — a forged record whose target IS
+    // the root must not be able to carry the whole quarantine away.
+    static bool IsStrictQuarantineChild(const std::wstring& canonicalLowerTarget);
+
+    // v2.24 (r7 X-3 / U-1): disk-truth reconcile. Marks still-unreleased
+    // QUARANTINE records (status Success) whose target no longer exists as
+    // released, and returns how many were marked plus their recorded
+    // bytes. This heals states where the quarantine root was emptied (or
+    // deleted by hand) while the records kept counting — the v2.23 status
+    // bar claimed 4.45 GB that was already free.
+    struct ReconcileResult {
+        size_t marked = 0;
+        unsigned long long freedBytes = 0;
+    };
+    ReconcileResult MarkReleasedWhereTargetsGone();
+
     // v2.5 (U-5): monotonic change counter — bumped on every write. Lets
     // callers (status bar quarantine usage) cache derived data and
     // invalidate precisely instead of re-parsing per tick.

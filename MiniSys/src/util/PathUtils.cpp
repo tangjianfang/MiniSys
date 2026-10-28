@@ -122,6 +122,82 @@ bool FileExists(const fs::path& p) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// --- RemoveAllLongPath ---------------------------------------------------
+
+namespace {
+
+bool DeleteLeafLongPath(const std::wstring& prefixed, bool isDir) {
+    // Read-only attributes would fail the delete; the quarantine contents
+    // are ours to remove, so clear them first.
+    SetFileAttributesW(prefixed.c_str(), FILE_ATTRIBUTE_NORMAL);
+    if (isDir) return RemoveDirectoryW(prefixed.c_str()) != FALSE;
+    return DeleteFileW(prefixed.c_str()) != FALSE;
+}
+
+// Returns true when the subtree below (and including) prefixedDir is gone.
+bool RemoveTreeLongRecursive(const std::wstring& prefixedDir, size_t& failed,
+                             std::vector<std::wstring>* survivors) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileExW((prefixedDir + L"\\*").c_str(), FindExInfoBasic,
+                                &fd, FindExSearchNameMatch, nullptr,
+                                FIND_FIRST_EX_LARGE_FETCH);
+    if (h == INVALID_HANDLE_VALUE) {
+        ++failed;
+        if (survivors) survivors->push_back(prefixedDir);
+        return false;
+    }
+    bool allChildrenGone = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+            continue;
+        std::wstring child = prefixedDir + L"\\" + fd.cFileName;
+        bool isDir    = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        bool isReparse = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        if (isDir && !isReparse) {
+            if (!RemoveTreeLongRecursive(child, failed, survivors)) {
+                allChildrenGone = false;   // depth-first
+            }
+        } else if (!DeleteLeafLongPath(child, isDir)) {
+            ++failed;
+            if (survivors) survivors->push_back(child);
+            allChildrenGone = false;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    // Only attempt the root when its children are all gone — a non-empty
+    // dir would just add a redundant "survivor" line to the report.
+    if (!allChildrenGone) return false;
+    if (!RemoveDirectoryW(prefixedDir.c_str())) {
+        ++failed;
+        if (survivors) survivors->push_back(prefixedDir);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+size_t RemoveAllLongPath(const std::wstring& root,
+                         std::vector<std::wstring>* survivors) {
+    if (survivors) survivors->clear();
+    fs::path p(root);
+    if (!p.is_absolute()) return 0;
+    std::wstring pre = LongPath(p);
+    while (pre.size() > 3 && pre.back() == L'\\') pre.pop_back();
+    DWORD attrs = GetFileAttributesW(pre.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) return 0;   // already gone
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (!DeleteLeafLongPath(pre, /*isDir=*/false)) {
+            if (survivors) survivors->push_back(pre);
+            return 1;
+        }
+        return 0;
+    }
+    size_t failed = 0;
+    RemoveTreeLongRecursive(pre, failed, survivors);
+    return failed;
+}
+
 bool DirExists(const fs::path& p) {
     DWORD a = GetFileAttributesW(LongPath(p).c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);

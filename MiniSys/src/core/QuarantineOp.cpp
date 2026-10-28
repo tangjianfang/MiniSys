@@ -94,6 +94,15 @@ bool QuarantineOp::Execute(std::wstring& errOut) {
         OperationLog::Instance().Append(rec_);
         return false;
     }
+    // r7-05 B5: Validate re-checks reparse points but this standalone path
+    // did not — a TOCTOU swap to a junction got the LINK itself moved.
+    if (IsReparsePoint(source_)) {
+        errOut = L"路径已成为链接（junction/符号链接），拒绝操作";
+        rec_.status = OpStatus::Failed;
+        rec_.note = errOut;
+        OperationLog::Instance().Append(rec_);
+        return false;
+    }
     if (GuardRails::IsProtectedPath(source_)) {
         errOut = L"受保护系统路径，拒绝操作";
         rec_.status = OpStatus::Failed;
@@ -137,6 +146,21 @@ bool QuarantineOp::UndoPaths(const std::wstring& recordId,
     if (!FileExists(quarantinePath) && !DirExists(quarantinePath)) {
         errOut = L"隔离区中找不到该项目（可能已被清空）";
         return false;
+    }
+    // r7-05 B4 (depth): the quarantine copy must live STRICTLY inside a
+    // MiniSys.Quarantine root — a forged record whose target IS the root
+    // must not be able to move the whole quarantine away on undo.
+    {
+        wchar_t canon[MAX_PATH * 2];
+        DWORD cn = GetFullPathNameW(quarantinePath.wstring().c_str(),
+                                    MAX_PATH * 2, canon, nullptr);
+        std::wstring t = (cn > 0 && cn < MAX_PATH * 2)
+                             ? ToLower(std::wstring(canon, cn))
+                             : ToLower(quarantinePath.wstring());
+        if (!OperationLog::IsStrictQuarantineChild(t)) {
+            errOut = L"记录的隔离路径不合法（不在隔离区根目录之下），已拒绝";
+            return false;
+        }
     }
     fs::path restoreTo = source;
     if (FileExists(restoreTo) || DirExists(restoreTo)) {

@@ -36,6 +36,11 @@ void UpdateHeaderSortArrows(HWND list, int col, bool asc);
 std::wstring OneLine(const std::wstring& s);
 // review-07 X-9 (v2.10): "MM-dd HH:mm" for the 修改时间 column.
 std::wstring FormatTimeShort(uint64_t filetime);
+// v2.24 (r7 X-7): presenters must update the info label through this
+// helper, not bare SetWindowTextW — the label's HEIGHT follows its text
+// (MainWindow::OnSize re-layout). Six bare call sites kept stale heights
+// and clipped two-line hints.
+void SetInfoText(const UiHandles& ui, const wchar_t* text);
 } // namespace
 
 // =====================================================================
@@ -60,6 +65,7 @@ void ListTabPresenter::Refresh() {
     CaptureCheckState();
     CaptureViewState();   // X-7
     snapshot_ = SessionService::Instance().Results(tab_);
+    ApplySortToSnapshot();   // r7 X-4: honor the user's sort on fresh data
     RenderItems();
 }
 
@@ -154,6 +160,11 @@ void ListTabPresenter::RenderItems() {
         }
     }
     SyncCheckDefaults();
+    // r7 X-8: LVM_SETITEMCOUNT does NOT clear comctl selection state —
+    // rows selected on another tab (shared ListView) stayed highlighted
+    // over THIS tab's data. Clear; RestoreViewState re-selects this tab's
+    // own paths by key right after.
+    ListView_SetItemState(ui_.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
     // Pre-render cell texts (allocation happens once here, not per paint).
     cells_.assign(snapshot_.size() * kScanCols.size(), std::wstring());
     for (size_t i = 0; i < snapshot_.size(); ++i) {
@@ -318,6 +329,13 @@ void UpdateHeaderSortArrows(HWND list, int col, bool asc) {
     }
 }
 
+// v2.24 (r7 X-7): see declaration at the top of the file.
+void SetInfoText(const UiHandles& ui, const wchar_t* text) {
+    if (!ui.info) return;
+    SetWindowTextW(ui.info, text);
+    if (ui.main) SendMessageW(ui.main, WM_SIZE, 0, 0);   // re-measure height
+}
+
 // REVIEW-UI P2 (L-11): the detail text carries "\n" separators (path +
 // hint); a list cell shows them as unprintable boxes — fold to one line.
 std::wstring OneLine(const std::wstring& s) {
@@ -477,8 +495,16 @@ void ListTabPresenter::ApplySortAndRefresh() {
     // rows' lParams are only consistent with the pre-sort snapshot order.
     CaptureCheckState();
     CaptureViewState();   // X-7
+    ApplySortToSnapshot();
+    RenderItems();
+    UpdateHeaderSortArrows(ui_.list, sortCol_, sortAsc_);
+}
+
+// r7 X-4: extracted from ApplySortAndRefresh — the sort itself, no side
+// effects, so Refresh() can replay it on fresh scan data.
+void ListTabPresenter::ApplySortToSnapshot() {
     auto& items = snapshot_;   // UI-private (REVIEW P1-1)
-    if (items.empty()) return;
+    if (items.empty() || sortCol_ < 0) return;
 
     bool asc = sortAsc_;
     switch (sortCol_) {
@@ -527,8 +553,6 @@ void ListTabPresenter::ApplySortAndRefresh() {
         default:
             break;
     }
-    RenderItems();
-    UpdateHeaderSortArrows(ui_.list, sortCol_, sortAsc_);
 }
 
 // =====================================================================
@@ -709,7 +733,7 @@ bool FolderTreePresenter::OnItemExpanding(HTREEITEM item) {
             TreeView_DeleteItem(ui_.tree, loadingItem_);
             loadingItem_ = nullptr;
         }
-        SetWindowTextW(ui_.info, L"ℹ 后台忙，稍后再次展开该文件夹。");
+        SetInfoText(ui_, L"ℹ 后台忙，稍后再次展开该文件夹。");
     }
     return TRUE;
 }
@@ -931,10 +955,10 @@ bool FolderTreePresenter::OnContextMenu() {
                 svc_.NotifyTaskStarted();   // R-3: gen-stamped (wp=0 was dropped)
                 return true;
             case SessionService::PlanStart::Busy:
-                SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
+                SetInfoText(ui_, L"ℹ 已有任务在进行中，请稍候。");
                 break;
             case SessionService::PlanStart::PlanStale:
-                SetWindowTextW(ui_.info, L"⚠ 计划已过期，请重新扫描。");
+                SetInfoText(ui_, L"⚠ 计划已过期，请重新扫描。");
                 break;
         }
     }
@@ -972,6 +996,20 @@ void HistoryPresenter::Refresh() {
                  static_cast<WPARAM>(rows_.size()), 0);
 }
 
+void HistoryPresenter::OnActivate() {
+    // v2.24 (r7 X-3): disk-truth reconcile BEFORE rendering — records
+    // whose quarantine target no longer exists become [已释放] (the files
+    // may have been emptied by a partial pre-v2.24 run or removed by
+    // hand). Without this the status bar and rows kept advertising
+    // gigabytes that were already free.
+    OperationLog::Instance().MarkReleasedWhereTargetsGone();
+    Refresh();
+}
+
+bool HistoryPresenter::RowIsDimmed(size_t row) const {
+    return row < rows_.size() && OperationLog::IsReleased(rows_[row]);
+}
+
 bool HistoryPresenter::SupplyDispInfo(NMLVDISPINFOW* di) {
     int row = di->item.iItem;
     if (row < 0 || static_cast<size_t>(row) >= rows_.size()) return false;
@@ -995,9 +1033,14 @@ std::wstring HistoryPresenter::HistoryTypeLabel(const OpRecord& r) {
         case OpType::Quarantine:      type = L"已隔离"; break;
         case OpType::MoveAndJunction: type = L"已迁移"; break;
         case OpType::EmptyRecycleBin: type = L"清空回收站"; break;
+        case OpType::EmptyQuarantine: type = L"清空隔离区"; break;
         case OpType::Delegate:        type = L"系统命令"; break;
         case OpType::DeleteToRecycleBin: default: type = L"回收站删除"; break;
     }
+    // v2.24 (r7 X-2): a released quarantine row must not read as a live,
+    // restorable isolation — the files are permanently gone.
+    if (r.type == OpType::Quarantine && OperationLog::IsReleased(r))
+        return type + L" · 已释放";
     switch (r.status) {
         case OpStatus::Success:      return type + L" · 成功";
         case OpStatus::Reverted:     return type + L" · 已还原";
@@ -1011,11 +1054,31 @@ std::wstring HistoryPresenter::HistoryRiskLabel(const OpRecord& r) {
     // X-27a (round-4 07): unsigned records still advertised "🛡 可还原" —
     // undo refuses them; the column must say so.
     if (!OperationLog::VerifySignature(r)) return L"未签名";
+    // v2.24 (r7 X-2): released = permanently deleted, NOT restorable.
+    if (OperationLog::IsReleased(r)) return L"已释放";
     if (r.status == OpStatus::Failed ||
         r.status == OpStatus::Interrupted) return L"需关注";
-    if (r.type == OpType::EmptyRecycleBin) return L"不可逆";
+    if (r.type == OpType::EmptyRecycleBin ||
+        r.type == OpType::EmptyQuarantine) return L"不可逆";
     if (!r.isReversible) return L"不可逆";
     return L"可还原";
+}
+
+HistoryPresenter::UndoClassify
+HistoryPresenter::ClassifyUndo(const std::vector<OpRecord>& sel) {
+    UndoClassify c;
+    for (const auto& r : sel) {
+        // v2.14 (T-A1): unsigned / tampered records are display-only.
+        if (!OperationLog::VerifySignature(r)) { ++c.unsignedN; }
+        // v2.24 (r7 X-2): released rows are dead — undoing them can only
+        // fail ("隔离区中找不到该项目"); refuse up front with a clear why.
+        else if (OperationLog::IsReleased(r)) { ++c.released; }
+        else if (!r.isReversible || r.status != OpStatus::Success) ++c.notReversible;
+        else if (r.type != OpType::MoveAndJunction &&
+                 r.type != OpType::Quarantine) ++c.deleteType;
+        else ++c.eligible;
+    }
+    return c;
 }
 
 void HistoryPresenter::UndoSelected() {
@@ -1029,30 +1092,32 @@ void HistoryPresenter::UndoSelected() {
         if (idx < static_cast<int>(recs.size())) selected.push_back(recs[idx]);
     }
     if (selected.empty()) {
-        SetWindowTextW(ui_.info, L"ℹ 请先选中一条或多条历史记录。");
+        SetInfoText(ui_, L"ℹ 请先选中一条或多条历史记录。");
         return;
     }
 
-    // Pre-flight eligibility classification for a clear hint.
-    size_t eligible = 0, notReversible = 0, deleteType = 0, unsignedN = 0;
-    for (const auto& r : selected) {
-        // v2.14 (T-A1): unsigned / tampered records are display-only.
-        if (!OperationLog::VerifySignature(r)) { ++unsignedN; }
-        else if (!r.isReversible || r.status != OpStatus::Success) ++notReversible;
-        else if (r.type != OpType::MoveAndJunction && r.type != OpType::Quarantine) ++deleteType;
-        else ++eligible;
-    }
-    if (eligible == 0) {
-        SetWindowTextW(ui_.info, unsignedN
-            ? L"ℹ 选中记录缺少有效签名（升级前的旧记录或被篡改），禁止还原——可在命令面板中“信任并签名旧记录”。"
-            : (deleteType
-            ? L"ℹ 选中项均为回收站删除（请手动从回收站还原）。"
-            : L"ℹ 选中记录不可撤销（仅成功且可逆的记录支持）。"));
+    // Pre-flight eligibility classification for a clear hint (v2.24: the
+    // classification itself is ClassifyUndo — unit-tested).
+    auto c = ClassifyUndo(selected);
+    if (c.eligible == 0) {
+        if (c.unsignedN) {
+            SetInfoText(ui_,
+                L"ℹ 选中记录缺少有效签名（升级前的旧记录或被篡改），禁止还原——可在命令面板中“信任并签名旧记录”。");
+        } else if (c.released) {
+            SetInfoText(ui_,
+                L"ℹ 选中项已随“清空隔离区”永久删除，无法还原（状态列见“已释放”）。");
+        } else if (c.deleteType) {
+            SetInfoText(ui_,
+                L"ℹ 选中项均为回收站删除（请手动从回收站还原）。");
+        } else {
+            SetInfoText(ui_,
+                L"ℹ 选中记录不可撤销（仅成功且可逆的记录支持）。");
+        }
         return;
     }
 
     if (!svc_.UndoRecordsAsync(selected)) {
-        SetWindowTextW(ui_.info, L"ℹ 已有任务在进行中，请稍候。");
+        SetInfoText(ui_, L"ℹ 已有任务在进行中，请稍候。");
         return;
     }
     svc_.NotifyTaskStarted();   // R-3: gen-stamped (wp=0 was dropped)

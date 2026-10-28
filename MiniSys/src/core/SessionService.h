@@ -37,10 +37,29 @@ public:
     bool IsBusy() const { return taskKind_.load() != 0; }
     bool IsScanning() const { return taskKind_.load() == static_cast<int>(TaskKind::Scanning); }
     bool IsSearching() const { return taskKind_.load() == static_cast<int>(TaskKind::Searching); }
+    // r7 X-9: executing (plan/undo/empty-quarantine) is cancellable between
+    // items — the UI offers the scan button as 取消 while a task runs.
+    bool IsExecuting() const { return taskKind_.load() == static_cast<int>(TaskKind::Executing); }
+    // r7 U-4: a lazy tree expansion can run for minutes; the UI offers the
+    // same Cancel affordance (the worker checks cancelScan_ per child).
+    bool IsExpanding() const { return taskKind_.load() == static_cast<int>(TaskKind::FolderExpand); }
     // B-3 (review-03): idle maintenance runs as Verifying — the UI needs to
     // tell it apart so a returning user can cancel it (never their scans).
     bool IsVerifying() const { return taskKind_.load() == static_cast<int>(TaskKind::Verifying); }
     void CancelScan() { cancelScan_.store(true); }
+
+    // v2.24 (r7 X-5): the tab a finished scan was STARTED for —
+    // OnScanDone must compose the completion info for THAT tab, not for
+    // whatever tab the user switched to during a 20 s scan (v2.23 wrote
+    // the junk dashboard onto the large-files page, including a bogus
+    // "系统状况良好" for a page that never scanned).
+    TabId LastScanTab() const {
+        int t = lastScanTab_.load();
+        return t < 0 ? TabId::Junk : static_cast<TabId>(t);
+    }
+    // v2.24 (r7-08 T3): the last scan ended cancelled or with an exception
+    // — its (partial) results must not be reported as "扫描完成/状况良好".
+    bool LastScanIncomplete() const { return lastScanIncomplete_.load(); }
 
     // review-04 R-4 fix (v2.10): monotonic task generation. Every DONE /
     // TASK_STARTED message carries the generation of the task that posted
@@ -199,6 +218,8 @@ private:
     std::atomic<int> taskKind_{0};          // TaskKind
     std::atomic<uint64_t> taskGen_{0};      // R-4: stamps DONE messages
     std::atomic<bool> cancelScan_{false};
+    std::atomic<int>  lastScanTab_{-1};     // X-5: origin tab of the finished scan
+    std::atomic<bool> lastScanIncomplete_{false};   // T3: cancelled / threw
     // B-3 (review r6-03, P0): true while the idle-maintenance task runs
     // (minutes-long re-walk) — interactive tasks preempt it via
     // cancelScan_ so the 80 ms search retry converges in seconds.

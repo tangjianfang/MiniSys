@@ -40,6 +40,11 @@ public:
     // Scan finished for this tab (default: refresh).
     virtual void OnScanDone() { Refresh(); }
 
+    // v2.24 (r7 X-2): should this row paint dimmed (dead/ historical)?
+    // The history page greys out [已释放] rows so "cleaned" state reads at
+    // a glance. Custom-draw asks the ACTIVE presenter per row.
+    virtual bool RowIsDimmed(size_t /*row*/) const { return false; }
+
     virtual void SortBySize() {}
     virtual void SortByTime() {}
     virtual void OnColumnClick(int /*col*/) {}
@@ -136,6 +141,10 @@ protected:
 
 private:
     void ApplySortAndRefresh();
+    // r7 X-4: the permutation core (no capture/render) — Refresh() replays
+    // the user's sort on fresh data; v2.23 reset row order on scan-done /
+    // tab round-trips while the header arrow kept promising otherwise.
+    void ApplySortToSnapshot();
     void ShowItemInfo(const ScanItem& it);   // REVIEW P1-6
     std::wstring RiskBadge(const ScanItem& it);   // tab-aware (v2.4)
 };
@@ -233,16 +242,33 @@ public:
     HistoryPresenter(UiHandles ui, SessionService& svc);
 
     void Refresh() override;   // render OperationLog records
+    // v2.24 (r7 X-3): entering the page reconciles record bookkeeping with
+    // disk truth (releases records whose quarantine targets vanished).
+    void OnActivate() override;
     void UndoSelected();       // undo the selected record
     bool SupplyDispInfo(NMLVDISPINFOW* di) override;   // v2.15
+    bool RowIsDimmed(size_t row) const override;   // [已释放] rows grey out
+
+    // v2.24: public + static so the label contract is unit-testable
+    // headless (MiniSysTests) — the v2.23 bug lived exactly here: rows
+    // kept saying "可还原" after 清空隔离区 permanently deleted the files.
+    static std::wstring HistoryTypeLabel(const OpRecord& r);
+    static std::wstring HistoryRiskLabel(const OpRecord& r);
+
+    // v2.24: undo pre-flight classification (also unit-testable). Rows
+    // whose quarantine copy was released are counted separately — the
+    // v2.23 pre-flight waved them through into guaranteed failures.
+    struct UndoClassify {
+        size_t eligible = 0, released = 0, notReversible = 0,
+               deleteType = 0, unsignedN = 0;
+    };
+    static UndoClassify ClassifyUndo(const std::vector<OpRecord>& sel);
 
 private:
     UiHandles ui_;
     SessionService& svc_;
     std::vector<OpRecord> rows_;   // v2.15: virtual-mode backing store
     std::vector<std::wstring> cells_;   // pre-rendered per-row texts (col-major)
-    static std::wstring HistoryTypeLabel(const OpRecord& r);
-    static std::wstring HistoryRiskLabel(const OpRecord& r);
 };
 
 } // namespace minisys

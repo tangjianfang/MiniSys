@@ -272,7 +272,14 @@ bool VolumeIndex::EnsureBuilt(wchar_t drive,
         // rebuild would resurrect the very index it is replacing.
         forceFullNext_ = false;
         valid_.store(false, std::memory_order_release);
-        return BuildFull(drive, progress, cancel);
+        bool ok = BuildFull(drive, progress, cancel);
+        // r7 B-1: this early return skipped the tail save below, and the
+        // walk's own SaveCacheIfWorthwhile() inside BuildFull runs BEFORE
+        // valid_ flips true (a guaranteed no-op) — a forced rebuild's
+        // result was NEVER persisted. The user's 49 s rebuild was silently
+        // discarded and the stale cache served on the next start.
+        if (ok) SaveCacheIfWorthwhile();
+        return ok;
     }
     if (!(valid_ && drive == drive_)) {
         // v2.5: disk cache first — the journal refresh below brings it
@@ -303,7 +310,13 @@ bool VolumeIndex::EnsureBuilt(wchar_t drive,
                     return true;
                 }
                 valid_.store(false, std::memory_order_release);
-                return BuildFull(drive, progress, cancel);
+                // r7 B-1 (same defect as the force branch): persist the
+                // serial-mismatch rebuild too.
+                {
+                    bool ok = BuildFull(drive, progress, cancel);
+                    if (ok) SaveCacheIfWorthwhile();
+                    return ok;
+                }
             }
         }
         valid_.store(false, std::memory_order_release);
@@ -693,6 +706,12 @@ void VolumeIndex::RefreshWalk(const std::function<void(const std::wstring&)>& pr
     if (WalkBuild(drive_, progress, cancel)) {
         Finalize();
         entryCount_.store(nodes_.size(), std::memory_order_release);
+        // r7 B-1 (third instance of the same defect): the idle re-walk
+        // replaced the index in memory but never persisted — the next
+        // start reloaded the stale cache and the walk's work was lost.
+        // One save per actual re-walk (NOT per tick — see the r6 B-1 fix
+        // at the RefreshFromUsn call site).
+        SaveCacheIfWorthwhile();
     }
 }
 
@@ -984,11 +1003,32 @@ VolumeIndex::SearchFilter VolumeIndex::ParseFilterTerms(const std::wstring& quer
                                                          std::wstring& freeQuery) {
     SearchFilter f;
     freeQuery.clear();
+    auto pushFree = [&freeQuery](const std::wstring& v) {
+        if (v.empty()) return;
+        if (!freeQuery.empty()) freeQuery += L' ';
+        freeQuery += v;
+    };
     for (const auto& tok : SplitQuery(query)) {
         std::wstring lower = ToLower(tok);
-        if (lower == L"folder:" || lower == L"is:folder" || lower == L"dir:") {
+        // r7 U-15: "folder:debug" (exactly what the app's OWN 快速筛选
+        // presets emit for Debug/Release/bin/obj folders) used to fall
+        // through as literal free text — those four presets returned 0
+        // hits forever, which is what sent the user into a pointless
+        // 49 s index rebuild on 2026-10-29. With a value the token now
+        // means: directories whose name contains the value
+        // (Everything-style "folder:debug").
+        if (lower.rfind(L"folder:", 0) == 0) {
             f.dirsOnly = true;
-        } else if (lower == L"file:" || lower == L"is:file") {
+            pushFree(tok.substr(7));
+        } else if (lower.rfind(L"dir:", 0) == 0) {
+            f.dirsOnly = true;
+            pushFree(tok.substr(4));
+        } else if (lower.rfind(L"file:", 0) == 0) {
+            f.filesOnly = true;
+            pushFree(tok.substr(5));
+        } else if (lower == L"is:folder") {
+            f.dirsOnly = true;
+        } else if (lower == L"is:file") {
             f.filesOnly = true;
         } else if (lower.rfind(L"ext:", 0) == 0 && tok.size() > 4) {
             std::wstring cur;
@@ -1001,8 +1041,7 @@ VolumeIndex::SearchFilter VolumeIndex::ParseFilterTerms(const std::wstring& quer
             }
             if (!cur.empty()) f.exts.push_back(ToLower(cur));
         } else {
-            if (!freeQuery.empty()) freeQuery += L' ';
-            freeQuery += tok;
+            pushFree(tok);
         }
     }
     for (auto& e : f.exts) {

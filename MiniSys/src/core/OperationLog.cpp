@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cwctype>
 #include <fstream>
 
 namespace minisys {
@@ -99,11 +100,27 @@ std::wstring SignedFieldsOf(const OpRecord& r) {
 // compare(3, 17) matched a 17-char substring against the 18-char literal
 // — never equal, so "信任并签名旧记录" has been dead code since v2.14.
 // The boundary clause rejects evil siblings ("...\MiniSys.Quarantine-evil\…").
+// v2.24 (r7-05 B4): STRICT subtree — the root ITSELF no longer qualifies
+// (undo on an adopted root-exact record moved the whole quarantine into a
+// forged source), and ".."/"." components are rejected (escape shapes).
 bool IsUnderQuarantineRoot(const std::wstring& targetLower) {
-    return targetLower.size() >= 21 && targetLower[1] == L':' &&
-           targetLower[2] == L'\\' &&
-           targetLower.compare(3, 18, L"minisys.quarantine") == 0 &&
-           (targetLower.size() == 21 || targetLower[21] == L'\\');
+    if (targetLower.size() < 23 || targetLower[1] != L':' ||
+        targetLower[2] != L'\\' ||
+        targetLower.compare(3, 18, L"minisys.quarantine") != 0 ||
+        targetLower[21] != L'\\') {
+        return false;
+    }
+    // At least one real, non-escaping component under the root.
+    size_t pos = 22;
+    while (pos <= targetLower.size()) {
+        size_t next = targetLower.find(L'\\', pos);
+        size_t end  = (next == std::wstring::npos) ? targetLower.size() : next;
+        std::wstring comp = targetLower.substr(pos, end - pos);
+        if (comp.empty() || comp == L".." || comp == L".") return false;
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    return true;
 }
 
 Json RecordToJson(const OpRecord& r) {
@@ -270,7 +287,15 @@ size_t OperationLog::SignUnsignedLegacy() {
     size_t n = 0;
     for (auto& r : all) {
         if (!r.sig.empty()) continue;
-        std::wstring t = ToLower(r.target);
+        // r7-05 B4: canonicalize FIRST — "X:\MiniSys.Quarantine\..\esc"
+        // must fold to "x:\esc" and fail the structural check outright
+        // instead of slipping through as a textual child of the root.
+        wchar_t canon[MAX_PATH * 2];
+        DWORD cn = GetFullPathNameW(r.target.c_str(), MAX_PATH * 2, canon,
+                                    nullptr);
+        std::wstring t = (cn > 0 && cn < MAX_PATH * 2)
+                             ? ToLower(std::wstring(canon, cn))
+                             : ToLower(r.target);
         // Structural check (T-B2: was dead code — see IsUnderQuarantineRoot)
         // plus a T-B3 hardening clause: the quarantine target must actually
         // exist on disk, so a forged history.jsonl cannot be adopted
@@ -343,6 +368,70 @@ std::vector<OpRecord> OperationLog::LoadAll() {
     return LoadAllLocked();
 }
 
+bool OperationLog::IsReleased(const OpRecord& r) {
+    // Note prefix is the persisted marker (see RunEmptyQuarantine /
+    // UpdateStatusBulk); status stays Success so the record remains
+    // "completed successfully" — the release is recorded in the note.
+    return r.note.rfind(kReleasedNotePrefix, 0) == 0;
+}
+
+bool OperationLog::IsStrictQuarantineChild(const std::wstring& t) {
+    return IsUnderQuarantineRoot(t);
+}
+
+OperationLog::ReconcileResult
+OperationLog::MarkReleasedWhereTargetsGone() {
+    // Candidates first (under the lock); existence probes happen outside —
+    // a network drive can make fs::exists block for seconds.
+    struct Candidate {
+        std::wstring id, target;
+        unsigned long long size;
+    };
+    std::vector<Candidate> cands;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        for (const auto& r : LoadAllLocked()) {
+            if (r.type != OpType::Quarantine || r.status != OpStatus::Success)
+                continue;
+            if (IsReleased(r)) continue;
+            if (r.target.size() < 2 || r.target[1] != L':') continue;
+            cands.push_back({r.id, r.target, r.sizeBytes});
+        }
+    }
+
+    // Cheap drive-level pre-check: a missing quarantine root takes every
+    // record of that drive with it (one probe per drive, not per record).
+    bool rootProbed[26] = {}, rootGone[26] = {};
+    ReconcileResult res;
+    std::vector<std::wstring> gone;
+    for (const auto& c : cands) {
+        int d = ::towupper(c.target[0]) - L'A';
+        if (d < 0 || d > 25) continue;
+        if (!rootProbed[d]) {
+            std::error_code ec;
+            std::filesystem::path root =
+                std::filesystem::path(
+                    std::wstring(1, static_cast<wchar_t>(L'A' + d)) + L":\\") /
+                L"MiniSys.Quarantine";
+            rootGone[d]  = !std::filesystem::exists(root, ec);
+            rootProbed[d] = true;
+        }
+        std::error_code ec;
+        if (rootGone[d] ||
+            !std::filesystem::exists(std::filesystem::path(c.target), ec)) {
+            gone.push_back(c.id);
+            res.freedBytes += c.size;
+        }
+    }
+    if (!gone.empty()) {
+        UpdateStatusBulk(gone, OpStatus::Success,
+                         std::wstring(kReleasedNotePrefix) +
+                             L" 隔离区中已无此文件（可能已被清空）");
+        res.marked = gone.size();
+    }
+    return res;
+}
+
 uint64_t OperationLog::Generation() {
     std::lock_guard<std::mutex> g(mu_);
     return gen_;
@@ -381,17 +470,19 @@ std::wstring OperationLog::TypeToStr(OpType t) {
         case OpType::MoveFilePath:       return L"MOVE_FILE";
         case OpType::Quarantine:         return L"QUARANTINE";
         case OpType::Delegate:           return L"DELEGATE";
+        case OpType::EmptyQuarantine:    return L"EMPTY_QUARANTINE";
     }
     return L"UNKNOWN";
 }
 
 OpType OperationLog::StrToType(const std::wstring& s) {
-    if (s == L"DELETE")        return OpType::DeleteToRecycleBin;
-    if (s == L"EMPTY_RECYCLE") return OpType::EmptyRecycleBin;
-    if (s == L"MOVE_JUNCTION") return OpType::MoveAndJunction;
-    if (s == L"MOVE_FILE")     return OpType::MoveFilePath;
-    if (s == L"QUARANTINE")    return OpType::Quarantine;
-    if (s == L"DELEGATE")      return OpType::Delegate;
+    if (s == L"DELETE")           return OpType::DeleteToRecycleBin;
+    if (s == L"EMPTY_RECYCLE")    return OpType::EmptyRecycleBin;
+    if (s == L"MOVE_JUNCTION")    return OpType::MoveAndJunction;
+    if (s == L"MOVE_FILE")        return OpType::MoveFilePath;
+    if (s == L"QUARANTINE")       return OpType::Quarantine;
+    if (s == L"DELEGATE")         return OpType::Delegate;
+    if (s == L"EMPTY_QUARANTINE") return OpType::EmptyQuarantine;
     return OpType::DeleteToRecycleBin;
 }
 

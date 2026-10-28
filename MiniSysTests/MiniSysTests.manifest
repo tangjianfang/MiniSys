@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- v2.24: the test binary links Presenters.cpp, whose TaskDialogIndirect
+       import needs the comctl32 v6 side-by-side assembly. Without this
+       manifest the loader resolved comctl32 5.82 and the process died with
+       STATUS_DLL_NOT_FOUND before main(). -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0" publicKeyToken="6595b64144ccf1df" language="*"
+        processorArchitecture="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

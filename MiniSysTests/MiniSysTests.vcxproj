@@ -55,8 +55,11 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>shell32.lib;advapi32.lib;ole32.lib;uuid.lib;user32.lib;rstrtmgr.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>shell32.lib;advapi32.lib;ole32.lib;uuid.lib;user32.lib;rstrtmgr.lib;bcrypt.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <Manifest>
+      <AdditionalManifestFiles>MiniSysTests.manifest</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -72,8 +75,11 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>shell32.lib;advapi32.lib;ole32.lib;uuid.lib;user32.lib;rstrtmgr.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>shell32.lib;advapi32.lib;ole32.lib;uuid.lib;user32.lib;rstrtmgr.lib;bcrypt.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <Manifest>
+      <AdditionalManifestFiles>MiniSysTests.manifest</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\third_party\googletest\src\gtest-all.cc" />
@@ -93,6 +99,8 @@
     <ClCompile Include="tests\DevBuildCacheTests.cpp" />
     <ClCompile Include="tests\GuardRailsAdversarialTests.cpp" />
     <ClCompile Include="tests\PerfBenchTests.cpp" />
+    <ClCompile Include="tests\PathUtilsTests.cpp" />
+    <ClCompile Include="tests\PresenterTests.cpp" />
     <ClCompile Include="..\MiniSys\src\core\SessionService.cpp" />
     <ClCompile Include="..\MiniSys\src\core\Settings.cpp" />
     <ClCompile Include="..\MiniSys\src\core\PlanBuilder.cpp" />
@@ -118,6 +126,12 @@
     <ClCompile Include="..\MiniSys\src\util\PathUtils.cpp" />
     <ClCompile Include="..\MiniSys\src\util\StringUtils.cpp" />
     <ClCompile Include="..\MiniSys\src\util\DirSizeCache.cpp" />
+    <ClCompile Include="..\MiniSys\src\core\LargeFileScanner.cpp" />
+    <ClCompile Include="..\MiniSys\src\core\AppScanner.cpp" />
+    <ClCompile Include="..\MiniSys\src\core\FolderTreeScanner.cpp" />
+    <ClCompile Include="..\MiniSys\src\util\FastWalk.cpp" />
+    <ClCompile Include="..\MiniSys\src\ui\Presenters.cpp" />
+    <ClCompile Include="..\MiniSys\src\ui\Layout.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
