@@ -43,6 +43,23 @@ public:
     // false when the list has changed since the plan was built (stale).
     static bool PlanMatches(const CleanPlan& plan,
                             const std::vector<ScanItem>& items);
+
+    // v2.26: rows that must clear an extra "are you REALLY sure" dialog on
+    // top of the normal confirmation: flagged dangerous, plain quarantine
+    // strategy, and not already covered by the system-component / recycle-bin
+    // warnings. Today that is version-control internals (.git packs). Before
+    // v2.26 ScanItem::dangerous was written by the scanners but read by
+    // nobody — the flag promised a confirmation that never appeared.
+    static bool IsGuarded(const ScanItem& it);
+
+    // v2.26: Apps tab — drop selected rows that already live on the
+    // migration target's drive (a same-volume move frees nothing; the
+    // MoveJunctionOp preflight refuses them, but only AFTER the user has
+    // confirmed). `dropped` receives how many were removed.
+    static std::vector<size_t> DropSameDrive(const std::vector<ScanItem>& items,
+                                             const std::vector<size_t>& indices,
+                                             const std::wstring& migrateTargetRoot,
+                                             size_t* dropped = nullptr);
 };
 
 } // namespace minisys

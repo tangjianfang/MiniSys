@@ -48,7 +48,6 @@ echo.
 echo [OK] Build succeeded.
 echo Output: %~dp0build\%CONFIG%\MiniSys.exe
 echo.
-endlocal
 
 REM v2.16: canonical deployment — build\Latest is THE exe users run.
 REM Rebuilds land there automatically so "which exe is current" has one answer.
@@ -58,3 +57,7 @@ if exist "%~dp0build\%CONFIG%\MiniSys.exe" (
     if exist "%~dp0build\%CONFIG%\rules.json" copy /Y "%~dp0build\%CONFIG%\rules.json" "%~dp0build\Latest\rules.json" >nul
     echo [Latest] deployed to build\Latest\MiniSys.exe
 )
+rem v2.26: endlocal moved HERE. It used to sit before this block, which cleared
+rem %CONFIG% first -- the path became "build\\MiniSys.exe", the test never held,
+rem and build\Latest was never populated.
+endlocal

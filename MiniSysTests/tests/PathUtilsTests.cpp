@@ -115,5 +115,40 @@ TEST_F(RemoveAllLongPathTest, EmptyFileArgumentIsSafe) {
     EXPECT_EQ(RemoveAllLongPath(L"relative\\path", &survivors), 0u);
 }
 
+// v2.25: configurable scan drives — the shared "C;D" parser behind the
+// 扫描盘 picker (settings.json round-trip + scanner configs).
+TEST(DriveListTest, ParsesLettersWithOrWithoutColonAndSeparators) {
+    auto v = ParseDriveList(L"c;D:, e:\\ f");
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0], L"C:\\");
+    EXPECT_EQ(v[1], L"D:\\");
+    EXPECT_EQ(v[2], L"E:\\");
+    EXPECT_EQ(v[3], L"F:\\");
+}
+
+TEST(DriveListTest, DropsGarbageAndDeduplicates) {
+    // "1", "CD", "C:\\x" and "" are not drive tokens; the second "c" is a dup.
+    auto v = ParseDriveList(L"1;CD;C:\\x;;c;C");
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0], L"C:\\");
+    EXPECT_TRUE(ParseDriveList(L"").empty());
+}
+
+TEST(DriveListTest, FormatRoundTripsAndKeepsOrder) {
+    auto v = ParseDriveList(L"d;c");
+    EXPECT_EQ(FormatDriveList(v), L"D;C");
+    EXPECT_EQ(ParseDriveList(FormatDriveList(v)), v);
+    EXPECT_EQ(FormatDriveList({}), L"");
+}
+
+TEST(DriveListTest, IsOnAnyDriveMatchesCaseInsensitively) {
+    auto roots = ParseDriveList(L"D;E");
+    EXPECT_TRUE(IsOnAnyDrive(L"d:\\Games\\x", roots));
+    EXPECT_TRUE(IsOnAnyDrive(L"E:\\", roots));
+    EXPECT_FALSE(IsOnAnyDrive(L"C:\\Windows", roots));
+    EXPECT_FALSE(IsOnAnyDrive(L"relative\\path", roots));
+    EXPECT_FALSE(IsOnAnyDrive(L"D:\\x", {}));
+}
+
 } // namespace
 } // namespace minisys

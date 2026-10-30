@@ -100,6 +100,9 @@
     <ClCompile Include="tests\GuardRailsAdversarialTests.cpp" />
     <ClCompile Include="tests\PerfBenchTests.cpp" />
     <ClCompile Include="tests\PathUtilsTests.cpp" />
+    <ClCompile Include="tests\MoveJunctionOpTests.cpp" />
+    <ClCompile Include="tests\LargeFileScannerTests.cpp" />
+    <ClCompile Include="tests\MultiDriveTests.cpp" />
     <ClCompile Include="tests\PresenterTests.cpp" />
     <ClCompile Include="..\MiniSys\src\core\SessionService.cpp" />
     <ClCompile Include="..\MiniSys\src\core\Settings.cpp" />

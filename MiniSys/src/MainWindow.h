@@ -42,6 +42,15 @@ private:
     void OnAbout();
     void OnOpenLocation();
     void OnChooseTarget();
+    void OnChooseDrives();                    // v2.25: 扫描盘 picker menu
+    void RefreshInfoCard();                   // v2.26: re-compose the info strip + relayout
+    // v2.26: which drives the tab's LAST scan used, so the info strip can say
+    // so and warn when the 扫描盘 has changed since. Unknown after a restart
+    // (cached results carry no scope) — then nothing is claimed.
+    struct ScanScope { bool known = false; std::wstring drives; };
+    ScanScope scanScope_[static_cast<size_t>(TabId::Count)];
+    void UpdateDrivesButton();                // v2.25: caption follows the selection
+    bool DrivePickerVisible() const;          // v2.25: 大文件 / 应用迁移 / 文件夹分析
     void UpdateStatusBar();
     void UpdateExecButton();                  // REVIEW P0-6: live count/size
     void ShowHint(const std::wstring& text);   // non-modal hint in the info label
@@ -75,6 +84,9 @@ private:
     int  idleCountdown_ = 0;                  // v2.10 (X-10): rescan grace
     DWORD idleArmInput_ = 0;                  // v2.10 (X-10): cancel on input
     bool tourMode_ = false;                   // v2.13c: -tour visual-review walk
+    bool selfTest_ = false;                   // v2.25: -selftest (no writes, no index)
+    int  selfTestExit_ = 0;                   // v2.25: process exit code in that mode
+    void RunSelfTest();                       // v2.25: non-visual layout audit walk
     std::wstring probeQuery_;                 // v2.16b: -probe <q> self-test
     int  probeStage_ = 0;                     // 0=wait index,1=wait search
     ULONGLONG lastIdleMaintTick_ = 0;         // B-3: idle-maintenance cooldown

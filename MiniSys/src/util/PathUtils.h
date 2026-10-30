@@ -26,6 +26,16 @@ std::wstring DriveRootOf(const std::filesystem::path& p);
 // Enumerate logical drive roots available on this system (e.g. {"C:\\", "D:\\"}).
 std::vector<std::wstring> EnumerateDrives();
 
+// v2.25 (configurable scan drives): "C;D" / "c:, d:\" -> {"C:\\", "D:\\"}.
+// Separators ; , and space; a token is a drive letter optionally followed by
+// ':' and '\'. Upper-cased, de-duplicated, order kept; anything else dropped.
+std::vector<std::wstring> ParseDriveList(const std::wstring& text);
+// Inverse of ParseDriveList: {"C:\\", "D:\\"} -> "C;D".
+std::wstring FormatDriveList(const std::vector<std::wstring>& roots);
+// Whether `p` lives on one of `roots` (drive roots as from ParseDriveList).
+bool IsOnAnyDrive(const std::filesystem::path& p,
+                  const std::vector<std::wstring>& roots);
+
 // Whether path is on system drive (the drive of %SystemRoot%).
 bool IsOnSystemDrive(const std::filesystem::path& p);
 

@@ -24,10 +24,9 @@ struct UiHandles {
     HWND lblMinSize = nullptr;   // LargeFiles settings labels
     HWND lblMinSizeUnit = nullptr;
     HWND lblFileType = nullptr;
-    HWND lblDrives = nullptr;
     HWND editMinSize = nullptr;  // LargeFiles settings edits
     HWND editFileType = nullptr;
-    HWND editDrives = nullptr;
+    HWND btnDrives = nullptr;    // v2.25: "扫描盘 ▾" picker (大文件/应用迁移/文件夹分析)
     HWND editSearch = nullptr;   // v2.3: instant search box
     HWND chkMatchPath = nullptr; // v2.3: match full path toggle
     HWND lblSearch = nullptr;    // v2.3: "搜索:" label

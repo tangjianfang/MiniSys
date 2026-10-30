@@ -56,6 +56,12 @@ std::vector<fs::path> DefaultExcludes() {
     // files list as deletable candidates — exclude every quarantine root.
     for (const auto& drive : EnumerateDrives()) {
         v.push_back(fs::path(drive) / L"MiniSys.Quarantine");
+        // v2.26: the system-drive list above only covers C:. Every other
+        // fixed drive has its own recycle bin and volume-information folder;
+        // their contents are not "large files" the user owns (the recycle
+        // bin is emptied from the 垃圾清理 tab), so keep them out of the list.
+        v.push_back(fs::path(drive) / L"$Recycle.Bin");
+        v.push_back(fs::path(drive) / L"System Volume Information");
     }
     return v;
 }
@@ -112,6 +118,28 @@ void ParallelHash(const std::vector<size_t>& indices,
 }
 
 } // namespace
+
+LargeFileScanner::FileClass LargeFileScanner::Classify(const fs::path& p) {
+    // Lower-case, '\' separators, so "D:/Repo/.GIT/objects/x" matches too.
+    std::wstring s = ToLower(p.wstring());
+    for (auto& ch : s) if (ch == L'/') ch = L'\\';
+
+    // A VCS metadata directory somewhere ABOVE the file. The directory
+    // itself (".git" as the last component) is not "inside" — removing a
+    // whole repo is a deliberate act on the folder, not on its pack files.
+    for (const wchar_t* dir : { L"\\.git\\", L"\\.hg\\", L"\\.svn\\" }) {
+        if (s.find(dir) != std::wstring::npos) return FileClass::VcsInternal;
+    }
+
+    auto dot = s.rfind(L'.');
+    if (dot != std::wstring::npos && s.find(L'\\', dot) == std::wstring::npos) {
+        std::wstring ext = s.substr(dot);
+        for (const wchar_t* e : { L".ipch", L".pch", L".obj", L".ilk", L".idb" }) {
+            if (ext == e) return FileClass::Regenerable;
+        }
+    }
+    return FileClass::Normal;
+}
 
 LargeFileScanner::LargeFileScanner() {
     cfg_.roots = DefaultRoots();
@@ -192,6 +220,9 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
             it.lastWriteFiletime = en.mtime;   // v2: re-verify on execute
             it.detail      = en.path.parent_path().wstring();
             it.recommended = false;
+            // v2.26: repo internals ask for the extra "危险项" confirmation
+            // (the execute dialog names them) on top of the 风险 label.
+            it.dangerous   = (Classify(en.path) == FileClass::VcsInternal);
             out.push_back(std::move(it));
         }
     }
@@ -202,6 +233,10 @@ void LargeFileScanner::Scan(std::vector<ScanItem>& out,
         std::unordered_map<unsigned long long, std::vector<size_t>> bySize;
         bySize.reserve(entries.size() * 2);
         for (size_t i = 0; i < entries.size(); ++i) {
+            // v2.26: never offer repo internals as "duplicates". Two clones
+            // of one repo hold byte-identical pack-*.pack files; pre-selecting
+            // the older copy for deletion would corrupt that clone.
+            if (Classify(entries[i].path) == FileClass::VcsInternal) continue;
             bySize[entries[i].size].push_back(i);
         }
 

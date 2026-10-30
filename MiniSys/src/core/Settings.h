@@ -12,7 +12,11 @@ struct Settings {
     bool useSymlink = false;
     int largeFilesMinMB = 100;
     std::wstring largeFilesExtFilter;   // ".mp4;.mkv"
-    std::wstring largeFilesDrives;      // "C;D"
+    // v2.25: global "扫描盘" selection ("C;D"), shared by 大文件 / 应用迁移 /
+    // 文件夹分析. Empty = each tab's own default (all fixed drives, except
+    // 应用迁移 = system drive). Replaces the v2.24 largeFilesDrives edit box;
+    // Load() still reads that legacy key when scanDrives is absent.
+    std::wstring scanDrives;
     std::vector<std::wstring> exclusions;   // user-protected paths
     // v2.9 session-restore: the search box / match-path toggle / active tab
     // come back exactly as left, so nothing has to be retyped or re-run.

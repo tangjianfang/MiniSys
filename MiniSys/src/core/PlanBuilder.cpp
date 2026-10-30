@@ -1,6 +1,7 @@
 #include "core/PlanBuilder.h"
 
 #include "platform/Hash.h"
+#include "util/PathUtils.h"
 #include "util/StringUtils.h"
 
 #include <set>
@@ -63,6 +64,32 @@ CleanPlan PlanBuilder::Build(TabId tab,
 bool PlanBuilder::PlanMatches(const CleanPlan& plan,
                               const std::vector<ScanItem>& items) {
     return HashPlanItems(plan.tab, plan.items, items) == plan.planHash;
+}
+
+bool PlanBuilder::IsGuarded(const ScanItem& it) {
+    return it.dangerous &&
+           it.riskLevel != RiskLevel::Advanced &&
+           it.strategy == CleanStrategy::Quarantine &&
+           it.path != L"$RECYCLE.BIN";
+}
+
+std::vector<size_t> PlanBuilder::DropSameDrive(const std::vector<ScanItem>& items,
+                                               const std::vector<size_t>& indices,
+                                               const std::wstring& migrateTargetRoot,
+                                               size_t* dropped) {
+    const std::wstring targetRoot = DriveRootOf(migrateTargetRoot);
+    std::vector<size_t> keep;
+    size_t drop = 0;
+    for (size_t idx : indices) {
+        if (idx < items.size() && !targetRoot.empty() &&
+            IEquals(DriveRootOf(items[idx].path), targetRoot)) {
+            ++drop;
+            continue;
+        }
+        keep.push_back(idx);
+    }
+    if (dropped) *dropped = drop;
+    return keep;
 }
 
 } // namespace minisys

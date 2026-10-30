@@ -13,8 +13,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int nCmdShow)
     // instance (gracefully — settings save, worker joins) and this one
     // takes over, so every build rotation replaces the running copy.
     bool takeover = lpCmdLine && wcsstr(lpCmdLine, L"-takeover") != nullptr;
-    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\MiniSys.SingleInstance");
-    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+    // v2.25: `-selftest` must never "surface the running copy and exit 0"
+    // (a false PASS) — it takes its own mutex and skips the single-instance
+    // hand-off entirely, so it can run next to a live MiniSys.
+    bool selfTest = lpCmdLine && wcsstr(lpCmdLine, L"-selftest") != nullptr;
+    HANDLE single = CreateMutexW(nullptr, TRUE,
+        selfTest ? L"Local\\MiniSys.SelfTest" : L"Local\\MiniSys.SingleInstance");
+    if (!selfTest && single && GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing = FindWindowW(L"MiniSysMainWnd", nullptr);
         if (takeover && existing) {
             // Ask the old instance to close itself; both are elevated, so

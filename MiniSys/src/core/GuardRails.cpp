@@ -99,6 +99,30 @@ PathPolicy& Policy() {
         for (const auto& drive : EnumerateDrives()) {
             sub(pol.fileSubtree, drive, L"MiniSys.Quarantine");
         }
+        // v2.25/26 (multi-drive): every fixed drive carries its own volume
+        // artefacts — $Recycle.Bin and System Volume Information exist on
+        // D:, E:, … exactly as on C:, and a pagefile can live on any of
+        // them. They were protected on the system drive only, yet the
+        // folder tree / large-file scan now offer every drive's top level.
+        // A SECOND Windows installation (…\Windows\System32 present) is
+        // protected like the first. Ordinary data folders — including a
+        // "Program Files" on D: — stay deliberately unprotected.
+        for (const auto& drive : EnumerateDrives()) {
+            if (IEquals(drive, root)) continue;   // system drive: lists above
+            sub(pol.fileSubtree, drive, L"$Recycle.Bin");
+            sub(pol.fileSubtree, drive, L"System Volume Information");
+            sub(pol.fileSubtree, drive, L"$WinREAgent");
+            sub(pol.fileSubtree, drive, L"Recovery");
+            sub(pol.fileSubtree, drive, L"Config.Msi");
+            exact(pol.fileExact, fs::path(drive) / L"pagefile.sys");
+            exact(pol.fileExact, fs::path(drive) / L"swapfile.sys");
+            exact(pol.fileExact, fs::path(drive) / L"hiberfil.sys");
+            std::error_code ec;
+            if (fs::exists(fs::path(drive) / L"Windows" / L"System32", ec)) {
+                sub(pol.fileSubtree, drive, L"Windows");
+                sub(pol.migSubtree, drive, L"Windows");
+            }
+        }
 
         // --- app migration ---
         exact(pol.migExact, fs::path(root) / L"Users");
@@ -112,6 +136,11 @@ PathPolicy& Policy() {
         sub(pol.migSubtree, root, L"Recovery");
         for (const auto& drive : EnumerateDrives()) {
             sub(pol.migSubtree, drive, L"MiniSys.Quarantine");
+            if (IEquals(drive, root)) continue;   // system drive: lists above
+            sub(pol.migSubtree, drive, L"$Recycle.Bin");           // v2.26
+            sub(pol.migSubtree, drive, L"System Volume Information");
+            sub(pol.migSubtree, drive, L"$WinREAgent");
+            sub(pol.migSubtree, drive, L"Recovery");
         }
 
         // --- built-in exempted system cleanup subtrees (T-B9 fix) ---

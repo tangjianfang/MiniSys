@@ -23,7 +23,7 @@
 #define IDC_EDIT_MINSIZE            2011  // min file size (MB)
 #define IDC_STATIC_MINSIZE_UNIT     2012  // "MB" label
 #define IDC_EDIT_FILETYPE           2013  // extension filter ".mp4;.mkv"
-#define IDC_EDIT_DRIVES             2014  // drive letters "C;D"
+#define IDC_BTN_DRIVES              2014  // v2.25: 扫描盘 picker (was the "C;D" edit box)
 #define IDC_TREEVIEW                2015  // folder-tree TreeView
 
 // Sort buttons (LargeFiles / all scan tabs)
@@ -46,6 +46,7 @@
 #define TIMER_VERIFY_LIST           5     // v2.7: debounced focus-return verify
 #define TIMER_IDLE_COUNTDOWN        6     // v2.10: idle rescan grace countdown
 #define TIMER_TOUR                  7     // v2.13c: -tour visual-review walk
+#define TIMER_SELFTEST              8     // v2.25: -selftest non-visual layout audit
 #define IDC_ACCEL_PALETTE           2091  // v2.10: Ctrl+K command palette
 // v2.4 (REVIEW-UI P1): async search completion
 #define WM_APP_SEARCH_DONE          (WM_APP + 6)
@@ -89,3 +90,9 @@
 #define IDM_QF_CLEAR        3024   // strip all filter tokens
 #define IDM_LIST_VERIFY     3025   // v2.7: verify rows, drop hand-deleted
 #define IDM_LIST_INVERT     3026   // v2.22: invert checkbox selection (Ctrl+I)
+#define IDM_LIST_CHECKEDFIRST 3027 // v2.26: checked rows to the top
+
+// v2.25: 扫描盘 popup menu — "默认" + one checkable entry per fixed drive
+// (IDM_DRIVE_FIRST + letter index, 'A' = 0).
+#define IDM_DRIVE_DEFAULT   3100
+#define IDM_DRIVE_FIRST     3110   // .. 3135

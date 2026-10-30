@@ -88,7 +88,7 @@ flowchart TB
 | `MainWindow` | Tab/控件布局与显隐、扫描配置读取、扫描线程派发与结果收集、勾选确认、按 Tab 构造 Operation 执行、历史渲染与撤销入口 | 扫描算法、文件操作细节、历史持久化格式 |
 | `JunkScanner` | 12 条静态规则(用户/系统 Temp、WU 下载缓存、CBS/DISM 日志、Minidump、Edge/Chrome 各 3 项)+ Firefox 多 Profile 动态发现 + 回收站 + 3 个 info-only 系统文件,并行尺寸计算 | 删除执行、规则外垃圾发现 |
 | `LargeFileScanner` | 阈值/扩展名/磁盘过滤、top-N(partial_sort,默认 200)、三级去重 | 目录树分析、规则类垃圾 |
-| `AppScanner` | 3 个 Uninstall hive 枚举、按 InstallLocation 去重、仅保留系统盘 ≥50MB 应用 | 迁移执行、UWP/Store 应用(isUWP 字段从未赋值) |
+| `AppScanner` | 3 个 Uninstall hive 枚举、按 InstallLocation 去重、仅保留“扫描盘”(v2.25 可选,默认系统盘)上 ≥50MB 的应用 | 迁移执行、UWP/Store 应用(isUWP 字段从未赋值) |
 | `FolderTreeScanner` | 固定盘顶层目录枚举与递归尺寸(串行) | 结果展示(TreeView 属 MainWindow)、删除 |
 | `DeleteOp` | 回收站删除(SHFileOperationW + FOF_ALLOWUNDO)、写历史 | 自动恢复(v1 未实现,提示手动) |
 | `EmptyRecycleOp` | 清空全系统回收站(不可逆)、写历史 | — |
@@ -285,10 +285,13 @@ history.tsv 列序:id, timestamp, type, status, sizeBytes, isReversible(0/1), so
 | 遍历性能 | FastWalk 2–8 线程,FindFirstFileExW(FindExInfoBasic + FIND_FIRST_EX_LARGE_FETCH);JunkScanner 规则级并行 DirectorySize;LargeFileScanner partial_sort 取 topN |
 | 去重 IO | 三级过滤:同 size → 头 64KB SHA-256 → 全量 SHA-256(2–8 线程并行) |
 | 可靠性 | 删除默认入回收站(FOF_ALLOWUNDO);迁移失败自动回滚;Interrupted 记录人工恢复指引 |
-| 安全 | 保护路径黑名单(Windows、WindowsApps、ProgramData\Microsoft、$Recycle.Bin、SVI);遍历永不穿越 reparse;迁移目标强制非系统盘;dangerous 项二次确认;RmGetList 占用预检 |
+| 安全 | 保护路径黑名单(Windows、WindowsApps、ProgramData\Microsoft、$Recycle.Bin、SVI);遍历永不穿越 reparse;迁移目标必须与应用所在盘不同(MoveJunctionOp 预检拦截同盘);dangerous 项二次确认;RmGetList 占用预检 |
 | 权限 | requireAdministrator;启动启用 SE_BACKUP / SE_RESTORE / SE_CREATE_SYMBOLIC_LINK(失败不阻断) |
 | 兼容性 | Windows 10/11 x64(manifest supportedOS);C++17(/stdcpp17 · ConformanceMode);长路径(longPathAware + `\\?\` 前缀);PerMonitorV2 DPI |
 | 资源 | 历史文件全量重写;日志无轮转;单 exe、无运行时依赖 |
+| 界面自检 | `MiniSys.exe -selftest`(`tools/smoke.ps1`):逐页、默认与最小窗口各走一遍,`ui/UiAudit` 检查出界/重叠/被遮挡/文字截断(含最坏情况文案)/标签底色,报告写 `%TEMP%\minisys-selftest.txt`,退出码 0 或 5。不碰 settings.json、不建索引、不受单实例限制。**只证明没坏,不判断好不好看** |
+| 版本库保护 | 大文件页:`.git/.hg/.svn` 内部文件不进重复组、标 dangerous、风险列显示“仓库数据”(`LargeFileScanner::Classify`);执行时 `PlanBuilder::IsGuarded` 命中的行需要**第二次**专门确认(默认取消)。注意:v2.25 及之前 `ScanItem::dangerous` 只写不读,并无二次确认 |
+| 多盘保护 | `$Recycle.Bin`、`System Volume Information`、`pagefile/swapfile/hiberfil`、`Config.Msi`、`Recovery` 对**每个固定盘**生效;次级 Windows(存在 `\Windows\System32`)同样保护。其它盘的 `Program Files` 等**刻意不保护**(游戏库等由用户自行清理),见 `MultiDriveTests` |
 
 ## 12. Key Decisions(ADR)
 

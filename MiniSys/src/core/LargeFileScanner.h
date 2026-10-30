@@ -16,6 +16,16 @@ public:
         std::vector<std::wstring> extFilter;
     };
 
+    // v2.26: what kind of file a path is, for the 风险 column and for the
+    // safety rules around it. Pure function of the path (nothing is read
+    // from disk), so it also works on cached rows and search results.
+    enum class FileClass {
+        Normal,        // nothing known about it
+        VcsInternal,   // inside .git / .hg / .svn — deleting ONE file corrupts the repo
+        Regenerable,   // IntelliSense / precompiled-header / object caches: a rebuild recreates them
+    };
+    static FileClass Classify(const std::filesystem::path& p);
+
     LargeFileScanner();
     explicit LargeFileScanner(Config cfg);
 

@@ -112,6 +112,13 @@ std::wstring MoveJunctionOp::PreflightCheckImpl(unsigned long long& srcSizeOut) 
     if (IsUnderProtected(source_)) return L"源目录位于受保护系统区域，拒绝迁移。";
     if (IsUnderProtected(target_)) return L"目标目录位于受保护系统区域，拒绝迁移。";
     if (DirExists(target_)) return L"目标目录已存在，请换一个不存在的路径。";
+    // v2.25: with a selectable source drive the target may now coincide with
+    // it — a same-volume move frees nothing, so refuse it up front.
+    if (auto srcRoot = DriveRootOf(source_);
+        !srcRoot.empty() && IEquals(srcRoot, DriveRootOf(target_))) {
+        return FormatW(L"源与目标同在 %s 盘，迁移不会释放空间，请选择其它盘作为迁移目标。",
+                       srcRoot.substr(0, 2).c_str());
+    }
 
     auto srcSize = DirectorySize(source_);
     srcSizeOut = srcSize;   // REVIEW P1-3 (03-B12): shared with Execute

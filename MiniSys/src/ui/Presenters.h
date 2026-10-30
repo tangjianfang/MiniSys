@@ -56,8 +56,19 @@ public:
     // per-row inserts (1000 rows measured 1.26-1.36 s; virtual ≈ 70 ms).
     virtual bool SupplyDispInfo(NMLVDISPINFOW* /*di*/) { return false; }
 
+    // v2.25: the user's 扫描盘 selection as drive roots ({"C:\\", "D:\\"});
+    // empty = each tab's own default. Shared by all presenters, UI thread
+    // only — MainWindow writes it, BuildScanner() overrides read it.
+    static void SetScanDrives(std::vector<std::wstring> roots) {
+        scanDrives_ = std::move(roots);
+    }
+    static const std::vector<std::wstring>& ScanDrives() { return scanDrives_; }
+
 protected:
     TabId tab_;
+
+private:
+    static inline std::vector<std::wstring> scanDrives_;
 };
 
 // Shared list rendering + sorting for the three ListView scan tabs
@@ -83,6 +94,9 @@ public:
     void SetAllChecked(bool on);
     // v2.22: 反选 — flip every row's check (context menu / Ctrl+I).
     void InvertChecked();
+    // v2.26: bring every checked row to the top (context menu) so the
+    // "执行（N 项）" count can be seen, not just trusted.
+    void MoveCheckedToTop();
     // v2.15: record a user check-flip from the virtual control into the map.
     void OnCheckFlipped(int row, bool checked);
     // X-41 (review r6-07, P0): read one row's check state — the source the

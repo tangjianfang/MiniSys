@@ -119,12 +119,11 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
     h.editFileType = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_FILETYPE), inst, nullptr);
-    h.lblDrives = CreateWindowExW(0, L"STATIC", L"扫描磁盘(C;D; 空=默认):",
-        WS_CHILD | WS_VISIBLE | SS_RIGHT,
-        0, 0, 0, 0, parent, nullptr, inst, nullptr);
-    h.editDrives = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_EDIT_DRIVES), inst, nullptr);
+    // v2.25: popup-menu drive picker (was a free-text "C;D" edit box);
+    // MainWindow::UpdateDrivesButton owns the caption.
+    h.btnDrives = CreateWindowExW(0, L"BUTTON", L"扫描盘: 默认 ▾",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_BTN_DRIVES), inst, nullptr);
 
     // ---- v2.3: instant search row (hidden by default, search tab only) ----
     h.lblSearch = CreateWindowExW(0, L"STATIC", L"搜索:",
@@ -167,7 +166,7 @@ UiHandles CreateControls(HWND parent, HINSTANCE inst) {
                       h.targetBtn, h.advancedChk, h.info, h.status,
                       h.lblMinSize, h.editMinSize, h.lblMinSizeUnit,
                       h.lblFileType, h.editFileType,
-                      h.lblDrives, h.editDrives,
+                      h.btnDrives,
                       h.lblSearch, h.editSearch, h.chkMatchPath,
                       h.btnQuickFilter, h.tree, h.about }) {
         SendMessageW(ctl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);

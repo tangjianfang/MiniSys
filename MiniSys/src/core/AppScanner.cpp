@@ -95,7 +95,6 @@ void EnumerateHive(const HiveSpec& spec, std::vector<AppInfo>& outApps) {
             continue;
         }
         if (!DirExists(app.installLocation)) continue;
-        app.isOnSystemDrive = IsOnSystemDrive(app.installLocation);
         outApps.push_back(std::move(app));
     }
     RegCloseKey(h);
@@ -123,11 +122,17 @@ void AppScanner::Scan(std::vector<ScanItem>& out,
         if (seen.insert(key).second) unique.push_back(std::move(a));
     }
 
+    // v2.25: which drives' apps to list — the user's selection, else the
+    // system drive (the tab's original purpose: moving apps off it).
+    std::vector<std::wstring> drives = cfg_.drives;
+    if (drives.empty()) drives.push_back(SystemDriveRoot());
+    for (auto& a : unique) a.isOnScanDrive = IsOnAnyDrive(a.installLocation, drives);
+
     unsigned long long total = unique.size();
     unsigned long long done = 0;
     for (auto& a : unique) {
         if (cancel.load()) return;
-        if (!a.isOnSystemDrive) { ++done; continue; }  // only show C-drive apps
+        if (!a.isOnScanDrive) { ++done; continue; }  // not on a selected drive
         if (progress) progress(done++, total, a.displayName);
         a.sizeBytesActual = DirectorySize(a.installLocation);
         if (a.sizeBytesActual == 0) a.sizeBytesActual = a.sizeBytesEstimated;

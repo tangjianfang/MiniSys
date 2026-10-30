@@ -7,9 +7,13 @@
 // these functions with zero coverage.
 #include <gtest/gtest.h>
 
+#include "core/AppScanner.h"
+#include "core/FolderTreeScanner.h"
+#include "core/LargeFileScanner.h"
 #include "core/OperationLog.h"
 #include "core/SessionService.h"
 #include "ui/Presenters.h"
+#include "util/PathUtils.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -215,6 +219,66 @@ TEST(OperationLogStatic, EmptyQuarantineTypeRoundTrip) {
               OpType::EmptyQuarantine);
     // Old files without the new type keep parsing (default arm).
     EXPECT_EQ(OperationLog::StrToType(L"QUARANTINE"), OpType::Quarantine);
+}
+
+// v2.25: the 扫描盘 picker's selection must reach the three scanners that
+// honour it — and an empty selection must leave each tab's own default
+// untouched (empty roots / drives = "all fixed", Apps = system drive).
+class ScanDrivesWiringTest : public ::testing::Test {
+protected:
+    void TearDown() override { TabPresenter::SetScanDrives({}); }
+    UiHandles ui_{};   // all-null handles: the Win32 reads degrade to defaults
+};
+
+TEST_F(ScanDrivesWiringTest, SelectionReachesLargeFilesAppsAndFolderTree) {
+    TabPresenter::SetScanDrives({ L"D:\\", L"E:\\" });
+
+    LargeFilesPresenter lf(TabId::LargeFiles, ui_);
+    auto s1 = lf.BuildScanner();
+    auto* large = dynamic_cast<LargeFileScanner*>(s1.get());
+    ASSERT_NE(large, nullptr);
+    ASSERT_EQ(large->GetConfig().roots.size(), 2u);
+    EXPECT_EQ(large->GetConfig().roots[0], std::filesystem::path(L"D:\\"));
+    EXPECT_EQ(large->GetConfig().roots[1], std::filesystem::path(L"E:\\"));
+
+    AppsPresenter ap(TabId::Apps, ui_);
+    auto s2 = ap.BuildScanner();
+    auto* apps = dynamic_cast<AppScanner*>(s2.get());
+    ASSERT_NE(apps, nullptr);
+    EXPECT_EQ(apps->GetConfig().drives,
+              (std::vector<std::wstring>{ L"D:\\", L"E:\\" }));
+
+    FolderTreePresenter ft(ui_, SessionService::Instance());
+    auto s3 = ft.BuildScanner();
+    auto* tree = dynamic_cast<FolderTreeScanner*>(s3.get());
+    ASSERT_NE(tree, nullptr);
+    EXPECT_EQ(tree->GetConfig().drives,
+              (std::vector<std::wstring>{ L"D:\\", L"E:\\" }));
+}
+
+TEST_F(ScanDrivesWiringTest, EmptySelectionKeepsPerTabDefaults) {
+    TabPresenter::SetScanDrives({});
+
+    LargeFilesPresenter lf(TabId::LargeFiles, ui_);
+    auto s1 = lf.BuildScanner();
+    auto* large = dynamic_cast<LargeFileScanner*>(s1.get());
+    ASSERT_NE(large, nullptr);
+    // The scanner fills empty roots with DefaultRoots() = every fixed drive.
+    std::vector<std::filesystem::path> fixed;
+    for (const auto& d : EnumerateDrives()) fixed.emplace_back(d);
+    EXPECT_EQ(large->GetConfig().roots, fixed);
+
+    AppsPresenter ap(TabId::Apps, ui_);
+    auto s2 = ap.BuildScanner();
+    auto* apps = dynamic_cast<AppScanner*>(s2.get());
+    ASSERT_NE(apps, nullptr);
+    EXPECT_TRUE(apps->GetConfig().drives.empty());     // -> system drive
+
+    FolderTreePresenter ft(ui_, SessionService::Instance());
+    auto s3 = ft.BuildScanner();
+    auto* tree = dynamic_cast<FolderTreeScanner*>(s3.get());
+    ASSERT_NE(tree, nullptr);
+    EXPECT_TRUE(tree->GetConfig().drives.empty());     // -> all fixed drives
 }
 
 } // namespace

@@ -14,6 +14,7 @@
 #include "ui/Dialogs.h"
 #include "ui/Icons.h"
 #include "ui/Layout.h"
+#include "ui/UiAudit.h"
 
 #include "platform/Privilege.h"
 #include "util/PathUtils.h"
@@ -28,6 +29,8 @@
 #include <commdlg.h>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -121,6 +124,13 @@ HFONT BoldUiFont(HWND ctl) {
 // the chrome erase and the tab strip.
 constexpr COLORREF kChromeBgr = RGB(0xF5, 0xF6, 0xF8);   // near-white chrome
 constexpr COLORREF kTabPill   = RGB(0xE8, 0xF1, 0xFB);   // soft accent tint
+
+// High-contrast themes keep the system surface (no custom chrome colours).
+bool HighContrastOn() {
+    HIGHCONTRASTW hc{ sizeof(hc) };
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) &&
+           (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
 
 // v2.22→v2.23: owner-drawn tab strip — the selected page is now a SOFT
 // LIGHT-BLUE PILL with accent bold text (the v2.22 white-chip + hard
@@ -474,11 +484,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             HDC dc = reinterpret_cast<HDC>(wp);
             RECT rc{};
             GetClientRect(hwnd_, &rc);
-            HIGHCONTRASTW hce{ sizeof(hce) };
-            bool hcOn = SystemParametersInfoW(SPI_GETHIGHCONTRAST,
-                                              sizeof(hce), &hce, 0) &&
-                        (hce.dwFlags & HCF_HIGHCONTRASTON);
-            if (hcOn) {
+            if (HighContrastOn()) {
                 FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
             } else {
                 HBRUSH bg = CreateSolidBrush(kChromeBgr);
@@ -486,6 +492,16 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 DeleteObject(bg);
             }
             return 1;
+        }
+        case WM_CTLCOLORSTATIC: {
+            // v2.26: the plain STATIC labels (最小大小 / MB / 文件类型 / 搜索)
+            // painted the stock BTNFACE grey over the near-white chrome — a
+            // visible grey slab behind each label (seen in the user's
+            // screenshot of the 大文件 tab). Paint them with the chrome.
+            if (HighContrastOn()) break;
+            static HBRUSH chrome = CreateSolidBrush(kChromeBgr);   // process-lifetime
+            SetBkColor(reinterpret_cast<HDC>(wp), kChromeBgr);
+            return reinterpret_cast<LRESULT>(chrome);
         }
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lp);
@@ -756,6 +772,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_BTN_OPENLOC: OnOpenLocation(); break;
                 case IDC_BTN_EMPTY_Q: OnEmptyQuarantine(); break;
                 case IDC_BTN_CHOOSE_TARGET: OnChooseTarget(); break;
+                case IDC_BTN_DRIVES: OnChooseDrives(); break;
                 case IDC_BTN_ABOUT:
                     OnAbout();
                     break;
@@ -808,6 +825,14 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                         lp2->InvertChecked();
                     }
                     UpdateExecButton();
+                    break;
+                }
+                case IDM_LIST_CHECKEDFIRST: {
+                    // v2.26: see ListTabPresenter::MoveCheckedToTop.
+                    if (auto* lp2 =
+                            dynamic_cast<ListTabPresenter*>(ActivePresenter())) {
+                        lp2->MoveCheckedToTop();
+                    }
                     break;
                 }
                 case IDM_LIST_PREVIEW:   OnPreviewExecution(); break;
@@ -961,6 +986,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             } else if (wp == TIMER_VERIFY_LIST) {
                 KillTimer(hwnd_, TIMER_VERIFY_LIST);
                 OnVerifyList(/*manual=*/false);
+            } else if (wp == TIMER_SELFTEST && selfTest_) {
+                KillTimer(hwnd_, TIMER_SELFTEST);
+                RunSelfTest();
             } else if (wp == TIMER_TOUR && tourMode_) {
                 // v2.13c: next tab in the visual-review walk.
                 int cur = TabCtrl_GetCurSel(h_.tab);
@@ -1012,13 +1040,16 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             DestroyWindow(hwnd_);
             return 0;
         case WM_DESTROY:
-            PostQuitMessage(0);
+            PostQuitMessage(selfTest_ ? selfTestExit_ : 0);
             return 0;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);
 }
 
 void MainWindow::OnCreate() {
+    // v2.25: decided FIRST — the very first OnTabChanged below must already
+    // skip the index build and the settings write.
+    selfTest_ = wcsstr(GetCommandLineW(), L"-selftest") != nullptr;
     h_ = CreateControls(hwnd_, hInst_);
 
     for (int i = 0; i < static_cast<int>(TabId::Count); ++i) {
@@ -1080,6 +1111,10 @@ void MainWindow::OnCreate() {
                     tourMode_ = true;
                     SetTimer(hwnd_, TIMER_TOUR, 4000, nullptr);
                 }
+                if (_wcsicmp(argv[i], L"-selftest") == 0) {
+                    // v2.25: runs once the window is shown; see RunSelfTest.
+                    SetTimer(hwnd_, TIMER_SELFTEST, 500, nullptr);
+                }
                 if (_wcsicmp(argv[i], L"-probe") == 0 && i + 1 < argc) {
                     probeQuery_ = argv[i + 1];
                     ++i;
@@ -1101,7 +1136,8 @@ void MainWindow::OnSize() {
     RECT rc; GetClientRect(hwnd_, &rc);
     LayoutWindow(h_, rc.right, rc.bottom,
                  CurrentTab() == TabId::LargeFiles,
-                 CurrentTab() == TabId::Search);
+                 CurrentTab() == TabId::Search,
+                 DrivePickerVisible());
     // v2.5: the progress bar overlays the 4th status pane — reposition it
     // whenever the parts move.
     UpdateStatusBar();
@@ -1523,8 +1559,24 @@ std::wstring MainWindow::ComposeScanTimeLine() const {
     if (at == 0) return {};
     std::wstring line = L"上次扫描: " + FormatAge(at);
     if (svc.ResultsFromCache(CurrentTab())) line += L"（上次会话的缓存结果）";
+    // v2.26: say WHICH drives that scan covered, and flag a stale list when
+    // the 扫描盘 has been changed since (the list still shows the old scope).
+    const auto& sc = scanScope_[static_cast<size_t>(CurrentTab())];
+    if (sc.known) {
+        line += L" · 范围: " + (!sc.drives.empty() ? sc.drives
+                                 : (CurrentTab() == TabId::Apps ? std::wstring(L"系统盘")
+                                                                : std::wstring(L"全部固定盘")));
+        if (sc.drives != FormatDriveList(TabPresenter::ScanDrives())) {
+            line += L"（⚠ 扫描盘已更改，点“扫描”刷新）";
+        }
+    }
     line += L" — 执行前会逐项复验文件是否已变化。\n";
     return line;
+}
+
+void MainWindow::RefreshInfoCard() {
+    SetWindowTextW(h_.info, (ComposeScanTimeLine() + tabInfoText_).c_str());
+    OnSize();   // the strip's height follows its text
 }
 
 // v2.5 cached results: while the user has been idle for 5+ minutes and the
@@ -1601,13 +1653,21 @@ void MainWindow::OnTabChanged() {
     ShowWindow(h_.advancedChk, isApps ? SW_SHOW : SW_HIDE);
 
     // Search row (v2.3) / LargeFiles settings panel
-    for (HWND h : { h_.lblSearch, h_.editSearch, h_.chkMatchPath }) {
+    // v2.25: btnQuickFilter was missing here since v2.6 — it stayed visible
+    // on every other tab once the search row had positioned it (found by
+    // -selftest: it floated beside the drive picker and over the History
+    // info card).
+    for (HWND h : { h_.lblSearch, h_.editSearch, h_.chkMatchPath,
+                    h_.btnQuickFilter }) {
         ShowWindow(h, isSearch ? SW_SHOW : SW_HIDE);
     }
     for (HWND h : { h_.lblMinSize, h_.editMinSize, h_.lblMinSizeUnit,
-                    h_.lblFileType, h_.editFileType, h_.lblDrives, h_.editDrives }) {
+                    h_.lblFileType, h_.editFileType }) {
         ShowWindow(h, isLargeFiles ? SW_SHOW : SW_HIDE);
     }
+    // v2.25: the 扫描盘 picker serves 大文件 / 应用迁移 / 文件夹分析.
+    ShowWindow(h_.btnDrives, DrivePickerVisible() ? SW_SHOW : SW_HIDE);
+    UpdateDrivesButton();   // the default scope differs per tab
 
     // v2.21 (简洁美观): the 按大小/按时间排序 toolbar buttons are GONE —
     // they duplicated the (arrow-annotated) column-header sorting that the
@@ -1640,17 +1700,17 @@ void MainWindow::OnTabChanged() {
             break;
         case TabId::LargeFiles:
             tabInfoText_ =
-                L"按最小大小、文件类型（.ext;..）与磁盘过滤查找大文件与重复文件（默认全部固定磁盘）；点列标题排序。\n"
-                L"⚠ 重复文件默认保留最新一份、预选其余副本；执行前会复验文件是否已变化。";
+                L"按最小大小、文件类型（.ext;..）与“扫描盘”过滤查找大文件与重复文件；点列标题排序。\n"
+                L"⚠ 重复文件默认保留最新一份、预选其余副本（版本库 .git 内部文件不参与）；“风险”列标出仓库数据，右键“已勾选项置顶”可看到被预选的项。";
             break;
         case TabId::Apps:
             tabInfoText_ =
-                L"扫描 C 盘已安装应用；先点“选择迁移目标盘…”，勾选后执行迁移，原位置以 Junction 保持可用。\n"
-                L"⚠ 迁移前自动检查目标空间与文件占用；UWP/商店应用不支持迁移，已自动排除。";
+                L"扫描“扫描盘”上已安装的应用；先点“选择迁移目标盘…”，勾选后执行迁移，原位置以 Junction 保持可用。\n"
+                L"⚠ 迁移目标必须与应用所在盘不同；迁移前自动检查目标空间与文件占用；UWP/商店应用不支持迁移，已自动排除。";
             break;
         case TabId::FolderTree:
             tabInfoText_ =
-                L"按磁盘显示顶层文件夹及其大小，快速定位空间大户。\n"
+                L"按“扫描盘”显示顶层文件夹及其大小，快速定位空间大户。\n"
                 L"⚠ 右键文件夹可移入隔离区（可撤销），系统目录受保护名单拦截。";
             break;
         case TabId::History:
@@ -1666,7 +1726,7 @@ void MainWindow::OnTabChanged() {
     if (t == TabId::Search) {
         // v2.3: auto-build the index on first visit.
         // REVIEW-UI P1 (L-5): Indexing mode — tabs stay switchable.
-        if (!VolumeIndex::AnyValid() &&
+        if (!VolumeIndex::AnyValid() && !selfTest_ &&   // -selftest: no disk walk
             !SessionService::Instance().IsBusy()) {
             if (SessionService::Instance().BuildIndexAsync()) {
                 SetTaskBusy(TaskMode::Indexing);
@@ -1692,23 +1752,41 @@ void MainWindow::UpdateStatusBar() {
     // Four status-bar parts: disk | quarantine/migrate-target | progress
     // text | (empty strip the progress BAR overlays — v2.5: the bar used to
     // float over the list's scrollbar at the bottom-right).
+    // v2.25: on the tabs that use the 扫描盘 picker the first pane shows the
+    // SELECTED drives' free space (compact); with the default selection, and
+    // on every other tab, it is the system drive as before. Computed first —
+    // more than two drives widen the pane.
+    std::wstring disk;
+    int shownDrives = 0;
+    if (DrivePickerVisible()) {
+        for (const auto& root : TabPresenter::ScanDrives()) {
+            DiskSpace d;
+            if (!QueryDiskSpace(root, d)) continue;
+            disk += shownDrives ? L"  ·  " : L" ";
+            disk += FormatW(L"%s 可用 %s", root.substr(0, 2).c_str(),
+                            FormatSize(d.freeBytes).c_str());
+            ++shownDrives;
+        }
+    }
+    if (shownDrives == 0) {
+        DiskSpace ds;
+        if (QueryDiskSpace(SystemDriveRoot(), ds)) {
+            disk = FormatW(L" 系统盘 %s  可用 %s / 共 %s",
+                SystemDriveRoot().c_str(),
+                FormatSize(ds.freeBytes).c_str(),
+                FormatSize(ds.totalBytes).c_str());
+        }
+    }
+
     RECT rc; GetClientRect(h_.status, &rc);
     int W = rc.right;
     int barW = UiScale(hwnd_, 220);
-    int e0 = UiScale(hwnd_, 340), e1 = UiScale(hwnd_, 660);
+    int widen = shownDrives > 2 ? (shownDrives - 2) * UiScale(hwnd_, 120) : 0;
+    int e0 = UiScale(hwnd_, 340) + widen, e1 = UiScale(hwnd_, 660) + widen;
     if (e1 > W - barW - 160) { e0 = W / 4; e1 = W / 2; }
     int e2 = (W - barW > e1 + 40) ? (W - barW) : (3 * W / 4);
     int edges[4] = { e0, e1, e2, -1 };
     SendMessageW(h_.status, SB_SETPARTS, 4, reinterpret_cast<LPARAM>(edges));
-
-    std::wstring disk;
-    DiskSpace ds;
-    if (QueryDiskSpace(SystemDriveRoot(), ds)) {
-        disk = FormatW(L" 系统盘 %s  可用 %s / 共 %s",
-            SystemDriveRoot().c_str(),
-            FormatSize(ds.freeBytes).c_str(),
-            FormatSize(ds.totalBytes).c_str());
-    }
     std::wstring mid;
     // REVIEW P0-6 (07-X22): the migrate target used to displace the
     // quarantine usage permanently — show it only where it matters.
@@ -1787,6 +1865,11 @@ void MainWindow::OnScan() {
     }
     if (!svc.StartScan(CurrentTab(), std::move(scanner))) return;
 
+    if (DrivePickerVisible()) {   // v2.26: remember the scope this scan used
+        auto& sc = scanScope_[static_cast<size_t>(CurrentTab())];
+        sc.known = true;
+        sc.drives = FormatDriveList(TabPresenter::ScanDrives());
+    }
     SetTaskBusy(TaskMode::Scanning);
     UpdateStatusBar();
 }
@@ -1956,7 +2039,7 @@ void MainWindow::SetTaskBusy(TaskMode mode) {
         if (h) EnableWindow(h, lockBrowse ? FALSE : TRUE);
     }
     for (HWND h : { h_.exec, h_.undo, h_.emptyQ, h_.open,
-                    h_.targetBtn, h_.advancedChk,
+                    h_.targetBtn, h_.advancedChk, h_.btnDrives,
                     h_.editSearch, h_.chkMatchPath, h_.btnQuickFilter }) {
         if (h) EnableWindow(h, scanning ? FALSE : (busy ? FALSE : TRUE));
     }
@@ -2122,14 +2205,36 @@ void MainWindow::OnExecute() {
         return;
     }
 
+    // v2.26: rows already on the migration target's drive free nothing —
+    // drop them NOW (and say so in the dialog) instead of letting each one
+    // fail in the MoveJunctionOp preflight after the user has confirmed.
+    size_t sameDriveDropped = 0;
+    if (t == TabId::Apps) {
+        selected = PlanBuilder::DropSameDrive(items, selected, migrateTargetRoot_,
+                                              &sameDriveDropped);
+        if (selected.empty()) {
+            ShowHint(FormatW(L"ℹ 所选 %zu 项应用与迁移目标同在一个盘，迁移不会释放空间。"
+                             L"请换一个迁移目标，或在“扫描盘”里改选应用所在的盘。",
+                             sameDriveDropped));
+            return;
+        }
+    }
+
     // REVIEW P0-6 (08-F1): risk-grouped summary instead of "N 项 + 总大小".
     struct Group { size_t count = 0; unsigned long long bytes = 0; };
-    Group gSafe, gCautious, gDelegate;
+    Group gSafe, gCautious, gDelegate, gGuarded;
     bool hasRecycleBin = false;
-    std::wstring dangerousNames;
+    std::wstring dangerousNames, guardedNames;
     for (auto idx : selected) {
         const auto& it = items[idx];
         if (it.path == L"$RECYCLE.BIN") { hasRecycleBin = true; continue; }
+        if (PlanBuilder::IsGuarded(it)) {   // v2.26: repo internals etc.
+            ++gGuarded.count; gGuarded.bytes += it.sizeBytes;
+            if (guardedNames.size() < 120) {
+                guardedNames += (guardedNames.empty() ? L"" : L"、") + it.title;
+            }
+            continue;
+        }
         if (it.riskLevel == RiskLevel::Safe) {
             ++gSafe.count; gSafe.bytes += it.sizeBytes;
         } else if (it.riskLevel == RiskLevel::Advanced) {
@@ -2166,7 +2271,13 @@ void MainWindow::OnExecute() {
     }
     if (gDelegate.count) groups += line(L"⚠ 系统组件", gDelegate.count, gDelegate.bytes,
                                         L"通过系统命令处理，不可自动撤销");
+    if (gGuarded.count) groups += line(L"⚠ 仓库数据", gGuarded.count, gGuarded.bytes,
+                                       L"版本库内部文件，只删一部分会损坏整个仓库");
     if (hasRecycleBin) groups += L"⚠ 清空回收站 — 不可逆\n";
+    if (sameDriveDropped) {
+        groups += FormatW(L"ℹ 另有 %zu 项与迁移目标同在一个盘，已自动排除（迁移不会释放空间）\n",
+                          sameDriveDropped);
+    }
     if (infoOnly) {
         groups += FormatW(L"⊘ 仅提示 %zu 项 — 不可执行，已自动排除\n", infoOnly);
     }
@@ -2236,9 +2347,22 @@ void MainWindow::OnExecute() {
                 FormatW(L"将处理 %zu 项，合计 %s", selected.size(),
                         FormatSize(totalSize).c_str()),
                 confirm,
-                (gDelegate.count || hasRecycleBin))) {
+                (gDelegate.count || hasRecycleBin || gGuarded.count))) {
             return;
         }
+    }
+
+    // v2.26: the ScanItem::dangerous promise, finally kept — repo internals
+    // need a SECOND, specific confirmation (default Cancel) naming them.
+    if (gGuarded.count &&
+        !dialogs::ConfirmTask(hwnd_, L"再次确认",
+            FormatW(L"其中 %zu 项是版本库（.git 等）内部文件", gGuarded.count),
+            L"只移走仓库里的一部分文件，会让对应的仓库无法使用，通常无法修复。\n\n涉及: " +
+                guardedNames +
+                L"\n\n除非确定这些仓库已不再需要，否则请取消。移入隔离区后仍可在“操作历史”还原，"
+                L"但“清空隔离区”之后就回不来了。",
+            true, L"仍然移入隔离区")) {
+        return;
     }
 
     // Everything goes through PlanBuilder + GuardRails from here on.
@@ -2391,7 +2515,18 @@ void MainWindow::LoadSettings() {
     Button_SetCheck(h_.advancedChk, useSymlink_ ? BST_CHECKED : BST_UNCHECKED);
     SetWindowTextW(h_.editMinSize, std::to_wstring(settings_.largeFilesMinMB).c_str());
     SetWindowTextW(h_.editFileType, settings_.largeFilesExtFilter.c_str());
-    SetWindowTextW(h_.editDrives, settings_.largeFilesDrives.c_str());
+    // v2.25: 扫描盘 — keep only drives that still exist as fixed disks (a
+    // saved "E" whose disk is gone falls back to the default instead of
+    // scanning nothing).
+    {
+        std::vector<std::wstring> sel;
+        const auto fixed = EnumerateDrives();
+        for (auto& r : ParseDriveList(settings_.scanDrives)) {
+            if (IsOnAnyDrive(r, fixed)) sel.push_back(std::move(r));
+        }
+        TabPresenter::SetScanDrives(std::move(sel));
+        UpdateDrivesButton();
+    }
     GuardRails::SetUserExclusions(settings_.exclusions);
     // v2.9: session restore — search box, match-path toggle, active tab.
     // The cached result list (incl. the last search) is loaded separately
@@ -2405,6 +2540,7 @@ void MainWindow::LoadSettings() {
 }
 
 void MainWindow::SaveSettings() {
+    if (selfTest_) return;   // v2.25: the audit walks every tab — never persist that
     settings_.migrateTargetRoot = migrateTargetRoot_;
     settings_.useSymlink = useSymlink_;
     wchar_t buf[512] = {};
@@ -2412,8 +2548,7 @@ void MainWindow::SaveSettings() {
     if (int mb = _wtoi(buf); mb > 0) settings_.largeFilesMinMB = mb;
     GetWindowTextW(h_.editFileType, buf, 512);
     settings_.largeFilesExtFilter = buf;
-    GetWindowTextW(h_.editDrives, buf, 128);
-    settings_.largeFilesDrives = buf;
+    settings_.scanDrives = FormatDriveList(TabPresenter::ScanDrives());
     // v2.9: session-restore fields.
     GetWindowTextW(h_.editSearch, buf, 512);
     settings_.lastSearchQuery = buf;
@@ -2530,6 +2665,7 @@ void MainWindow::OnListContextMenu() {
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTALL,  L"全选\tCtrl+A");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_SELECTNONE, L"全不选");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_INVERT,     L"反选\tCtrl+I");
+    AppendMenuW(hMenu, MF_STRING, IDM_LIST_CHECKEDFIRST, L"已勾选项置顶");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_PREVIEW,    L"预览执行（安全闸检查）…");
     AppendMenuW(hMenu, MF_STRING, IDM_LIST_EXCLUDE,    L"永不清理此项目");
@@ -2554,9 +2690,17 @@ void MainWindow::OnChooseTarget() {
     wchar_t buf[MAX_PATH];
     if (SHGetPathFromIDListW(pidl, buf)) {
         migrateTargetRoot_ = buf;
-        if (IsOnSystemDrive(migrateTargetRoot_)) {
+        // v2.25: the apps' source drives are the 扫描盘 selection (default:
+        // the system drive). A target on the ONLY source drive frees nothing;
+        // with several source drives it can be right for the others, and
+        // MoveJunctionOp's preflight rejects the same-drive items.
+        std::vector<std::wstring> srcDrives = TabPresenter::ScanDrives();
+        if (srcDrives.empty()) srcDrives.push_back(SystemDriveRoot());
+        if (srcDrives.size() == 1 && IsOnAnyDrive(migrateTargetRoot_, srcDrives)) {
             MessageBoxW(hwnd_,
-                L"目标在系统盘，迁移无意义。已忽略选择。",
+                FormatW(L"目标与待迁移应用同在 %s 盘，迁移无意义。已忽略选择。\n"
+                        L"（可在“扫描盘”里改选应用所在的盘。）",
+                        srcDrives[0].substr(0, 2).c_str()).c_str(),
                 L"提示", MB_OK | MB_ICONWARNING);
             migrateTargetRoot_.clear();
         }
@@ -2564,6 +2708,147 @@ void MainWindow::OnChooseTarget() {
     CoTaskMemFree(pidl);
     SaveSettings();   // REVIEW P2 (08-F11): persist across restarts
     UpdateStatusBar();
+}
+
+bool MainWindow::DrivePickerVisible() const {
+    auto t = CurrentTab();
+    return t == TabId::LargeFiles || t == TabId::Apps || t == TabId::FolderTree;
+}
+
+// v2.25: caption states the EFFECTIVE scope, never a bare "默认" — with no
+// selection that is the active tab's own default (应用迁移 = 系统盘, the
+// others = 全部固定盘); otherwise the chosen letters ("C D").
+void MainWindow::UpdateDrivesButton() {
+    const auto& sel = TabPresenter::ScanDrives();
+    std::wstring cap = L"扫描盘: ";
+    if (sel.empty()) {
+        cap += (CurrentTab() == TabId::Apps) ? L"系统盘" : L"全部固定盘";
+    } else if (sel.size() > 5) {
+        cap += FormatW(L"%u 个盘", static_cast<unsigned>(sel.size()));
+    } else {
+        for (size_t i = 0; i < sel.size(); ++i) {
+            if (i) cap += L' ';
+            cap += sel[i][0];
+        }
+    }
+    cap += L" ▾";
+    SetWindowTextW(h_.btnDrives, cap.c_str());
+}
+
+// v2.25: 扫描盘 picker — one checkable entry per fixed drive, the menu
+// re-opens after every toggle (multi-select) until dismissed. "默认" clears
+// the selection: each tab keeps its own scope (all fixed drives; 应用迁移 =
+// system drive). The change applies to the NEXT scan.
+void MainWindow::OnChooseDrives() {
+    auto selected = TabPresenter::ScanDrives();
+    const auto fixed = EnumerateDrives();
+    bool changed = false;
+    RECT rc{};
+    GetWindowRect(h_.btnDrives, &rc);
+    for (;;) {
+        HMENU m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING | (selected.empty() ? MF_CHECKED : 0),
+                    IDM_DRIVE_DEFAULT,
+                    L"默认（应用迁移：系统盘；其余：全部固定盘）");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        for (const auto& root : fixed) {
+            std::wstring label = root.substr(0, 2);
+            if (IEquals(root, SystemDriveRoot())) label += L"  系统盘";
+            DiskSpace d;
+            if (QueryDiskSpace(root, d)) {
+                label += FormatW(L"    可用 %s / 共 %s",
+                                 FormatSize(d.freeBytes).c_str(),
+                                 FormatSize(d.totalBytes).c_str());
+            }
+            UINT flags = MF_STRING | (IsOnAnyDrive(root, selected) ? MF_CHECKED : 0);
+            AppendMenuW(m, flags, IDM_DRIVE_FIRST + (root[0] - L'A'), label.c_str());
+        }
+        int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                 rc.left, rc.bottom, 0, hwnd_, nullptr);
+        DestroyMenu(m);
+        if (cmd == 0) break;
+        changed = true;
+        if (cmd == IDM_DRIVE_DEFAULT) {
+            selected.clear();
+            continue;
+        }
+        const std::wstring root = { static_cast<wchar_t>(L'A' + (cmd - IDM_DRIVE_FIRST)),
+                                    L':', L'\\' };
+        auto it = std::find_if(selected.begin(), selected.end(),
+            [&](const std::wstring& s) { return IEquals(s, root); });
+        if (it != selected.end()) selected.erase(it);
+        else selected.push_back(root);
+    }
+    if (!changed) return;
+
+    std::sort(selected.begin(), selected.end());
+    TabPresenter::SetScanDrives(selected);
+    UpdateDrivesButton();
+    SaveSettings();
+    UpdateStatusBar();
+    if (scanScope_[static_cast<size_t>(CurrentTab())].known) {
+        RefreshInfoCard();   // the 上次扫描 line now warns that the list is stale
+    } else {
+        ShowHint(selected.empty()
+            ? L"ℹ 扫描盘已恢复默认，点击“扫描”生效。"
+            : L"ℹ 扫描盘已改为 " + FormatDriveList(selected) + L"，点击“扫描”生效。");
+    }
+}
+
+// v2.25 (win32-gui-tool-dev): `-selftest` — NON-VISUAL layout audit. Walks
+// every tab at the default window size and at the minimum track size, audits
+// the visible controls (ui/UiAudit), writes %TEMP%\minisys-selftest.txt and
+// exits 0 (clean) or 5 (layout problems). It proves nothing is clipped,
+// covered or overlapping; it does NOT judge how the window looks.
+void MainWindow::RunSelfTest() {
+    std::wstring report;
+    size_t total = 0;
+    auto line = [&report](const std::wstring& s) { report += s; report += L"\r\n"; };
+
+    RECT wr{}; GetWindowRect(hwnd_, &wr);
+    const int origW = wr.right - wr.left, origH = wr.bottom - wr.top;
+    MINMAXINFO mmi{};
+    SendMessageW(hwnd_, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&mmi));
+    const int minW = mmi.ptMinTrackSize.x, minH = mmi.ptMinTrackSize.y;
+
+    line(FormatW(L"MiniSys UI selftest   dpi=%d   default window %dx%d, minimum %dx%d",
+                 UiScale(hwnd_, 96), origW, origH, minW, minH));
+
+    for (int t = 0; t < static_cast<int>(TabId::Count); ++t) {
+        TabCtrl_SetCurSel(h_.tab, t);
+        OnTabChanged();
+        for (int pass = 0; pass < 2; ++pass) {
+            SetWindowPos(hwnd_, nullptr, 0, 0, pass ? minW : origW,
+                         pass ? minH : origH,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            RECT cr{}; GetClientRect(hwnd_, &cr);
+            AuditReport rep = AuditVisibleControls(
+                h_, HighContrastOn() ? CLR_INVALID : kChromeBgr);
+            line(FormatW(L"\r\n[%s] %s size, client %ldx%ld: %zu controls, %zu problem(s)",
+                         TabName(static_cast<TabId>(t)),
+                         pass ? L"minimum" : L"default", cr.right, cr.bottom,
+                         rep.inventory.size(), rep.problems.size()));
+            if (pass == 0) {
+                for (const auto& s : rep.inventory) line(L"    " + s);
+            }
+            for (const auto& s : rep.problems) line(L"  PROBLEM " + s);
+            total += rep.problems.size();
+        }
+    }
+    SetWindowPos(hwnd_, nullptr, 0, 0, origW, origH,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    line(FormatW(L"\r\nRESULT: %s (%zu problem(s))", total ? L"FAIL" : L"PASS", total));
+    line(L"NOT JUDGED: how it looks (spacing, colour, alignment, real-DPI feel).");
+
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    std::ofstream f(std::filesystem::path(tmp) / L"minisys-selftest.txt",
+                    std::ios::binary | std::ios::trunc);
+    f << "\xEF\xBB\xBF" << WideToUtf8(report);
+
+    selfTestExit_ = total ? 5 : 0;
+    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
 }
 
 } // namespace minisys

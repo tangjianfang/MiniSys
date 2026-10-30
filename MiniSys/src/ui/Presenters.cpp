@@ -410,9 +410,17 @@ std::wstring LocalizeCategory(const std::wstring& c) {
 // depending on the installed font set.
 std::wstring ListTabPresenter::RiskBadge(const ScanItem& it) {
     // REVIEW-UI P1 (L-7): search results are unclassified by design — say so
-    // instead of the meaningless "—".
-    if (tab_ == TabId::Search) {
-        return it.path == L"$RECYCLE.BIN" ? L"⚠️ 不可逆" : L"ℹ️ 未评估";
+    // instead of the meaningless "—". v2.26: the same holds for 大文件/去重
+    // (its whole 风险 column used to read "—"), and the path-based classes
+    // that ARE known are shown: repo internals warn, rebuildable caches say so.
+    if (tab_ == TabId::Search || tab_ == TabId::LargeFiles) {
+        if (it.path == L"$RECYCLE.BIN") return L"⚠️ 不可逆";
+        switch (LargeFileScanner::Classify(it.path)) {
+            case LargeFileScanner::FileClass::VcsInternal: return L"⚠️ 仓库数据";
+            case LargeFileScanner::FileClass::Regenerable: return L"ℹ️ 可再生";
+            case LargeFileScanner::FileClass::Normal:      break;
+        }
+        return L"ℹ️ 未评估";
     }
     if (it.ruleId.empty() && it.path != L"$RECYCLE.BIN") return L"—";
     if (it.path == L"$RECYCLE.BIN") return L"⚠️ 不可逆";
@@ -490,6 +498,24 @@ void ListTabPresenter::OnColumnClick(int col) {
     ApplySortAndRefresh();
 }
 
+// v2.26: 已勾选项置顶. The exec button counts ALL checked rows, but with a
+// 200-row list the pre-selected ones (duplicate copies) are usually off
+// screen — "执行（16 项）" with nothing visibly checked. This brings them to
+// the top (stable, so each half keeps its order) and drops the sort arrow,
+// which no longer describes the order.
+void ListTabPresenter::MoveCheckedToTop() {
+    auto checked = [this](const ScanItem& it) {
+        auto c = checkStateByPath_.find(ToLower(it.path.wstring()));
+        return c == checkStateByPath_.end() ? it.recommended : c->second;
+    };
+    CaptureCheckState();
+    CaptureViewState();
+    std::stable_partition(snapshot_.begin(), snapshot_.end(), checked);
+    sortCol_ = -1;
+    RenderItems();
+    UpdateHeaderSortArrows(ui_.list, sortCol_, sortAsc_);
+}
+
 void ListTabPresenter::ApplySortAndRefresh() {
     // REVIEW-UI P0 (L-1): capture check state BEFORE the permutation — the
     // rows' lParams are only consistent with the pre-sort snapshot order.
@@ -517,13 +543,23 @@ void ListTabPresenter::ApplySortToSnapshot() {
                                : (ToLower(a.title) > ToLower(b.title));
                 });
             break;
-        case 1:   // 风险 (severity order)
+        case 1: { // 风险 (severity order — v2.26: by what the column SHOWS)
+            const bool byPath = (tab_ == TabId::Search || tab_ == TabId::LargeFiles);
+            auto rank = [byPath](const ScanItem& x) {
+                if (!byPath) return static_cast<int>(x.riskLevel);
+                switch (LargeFileScanner::Classify(x.path)) {
+                    case LargeFileScanner::FileClass::Regenerable: return 0;
+                    case LargeFileScanner::FileClass::Normal:      return 1;
+                    case LargeFileScanner::FileClass::VcsInternal: return 2;
+                }
+                return 1;
+            };
             std::stable_sort(items.begin(), items.end(),
-                [asc](const ScanItem& a, const ScanItem& b) {
-                    return asc ? (a.riskLevel < b.riskLevel)
-                               : (a.riskLevel > b.riskLevel);
+                [asc, &rank](const ScanItem& a, const ScanItem& b) {
+                    return asc ? (rank(a) < rank(b)) : (rank(a) > rank(b));
                 });
             break;
+        }
         case 2:   // 项目 (case-insensitive)
             std::stable_sort(items.begin(), items.end(),
                 [asc](const ScanItem& a, const ScanItem& b) {
@@ -597,37 +633,17 @@ std::unique_ptr<Scanner> LargeFilesPresenter::BuildScanner() {
         }
     }
 
-    // -- Drive filter --
-    wchar_t drvBuf[128] = {};
-    GetWindowTextW(ui_.editDrives, drvBuf, 128);
-    std::wstring drvStr(drvBuf);
-    if (!drvStr.empty()) {
-        cfg.roots.clear();
-        std::wstring token;
-        for (auto ch : drvStr) {
-            if (ch == L';' || ch == L',' || ch == L' ') {
-                if (!token.empty()) {
-                    // Accept "C" or "C:" or "C:\"
-                    wchar_t letter = ::towupper(token[0]);
-                    std::wstring root = {letter, L':', L'\\'};
-                    cfg.roots.push_back(root);
-                    token.clear();
-                }
-            } else {
-                token += ch;
-            }
-        }
-        if (!token.empty()) {
-            wchar_t letter = ::towupper(token[0]);
-            cfg.roots.push_back(std::wstring{letter, L':', L'\\'});
-        }
-    }
+    // -- Drive filter (v2.25: the shared 扫描盘 picker; empty = all fixed) --
+    for (const auto& root : ScanDrives()) cfg.roots.emplace_back(root);
 
     return std::make_unique<LargeFileScanner>(std::move(cfg));
 }
 
 std::unique_ptr<Scanner> AppsPresenter::BuildScanner() {
-    return std::make_unique<AppScanner>();
+    // v2.25: empty selection keeps the old behaviour (system drive only).
+    AppScanner::Config cfg;
+    cfg.drives = ScanDrives();
+    return std::make_unique<AppScanner>(std::move(cfg));
 }
 
 // ---- SearchPresenter (v2.3) ----------------------------------------------
@@ -680,7 +696,10 @@ std::unique_ptr<Scanner> FolderTreePresenter::BuildScanner() {
         ClearFocusRoot();
         return std::make_unique<FolderTreeScanner>(std::move(cfg));
     }
-    return std::make_unique<FolderTreeScanner>();
+    // v2.25: the shared 扫描盘 picker (empty = all fixed drives).
+    FolderTreeScanner::Config cfg;
+    cfg.drives = ScanDrives();
+    return std::make_unique<FolderTreeScanner>(std::move(cfg));
 }
 
 void FolderTreePresenter::OnScanDone() {
@@ -849,6 +868,19 @@ void ListTabPresenter::ShowItemInfo(const ScanItem& it) {
     if (it.ruleId.empty()) {
         consequence = L"非规则项（大文件/应用/文件夹），请自行判断是否需要。"
                       L"操作仍受安全闸保护（系统目录、云文件一律拒绝）。";
+        switch (LargeFileScanner::Classify(it.path)) {
+            case LargeFileScanner::FileClass::VcsInternal:
+                consequence = L"⚠ 版本库内部数据（.git / .hg / .svn）：只删其中一个文件会损坏整个仓库，"
+                              L"通常无法修复；也不会被当作“重复文件”预选。"
+                              L"想释放这部分空间，请对整个仓库目录操作（或在仓库里执行 git gc）。";
+                break;
+            case LargeFileScanner::FileClass::Regenerable:
+                consequence = L"IntelliSense / 预编译头 / 目标文件缓存：删除后下次编译或打开项目会自动重新生成，"
+                              L"期间会稍慢。";
+                break;
+            case LargeFileScanner::FileClass::Normal:
+                break;
+        }
         undoLine = it.path == L"$RECYCLE.BIN"
                        ? L"清空回收站不可撤销。"
                        : L"移入隔离区，可在“操作历史”一键还原。";

@@ -5,9 +5,13 @@ namespace minisys {
 
 // Positions all child controls for the current window size.
 // showSettings = whether the LargeFiles settings row is visible;
-// showSearch  = whether the instant-search row is visible (v2.3).
+// showSearch  = whether the instant-search row is visible (v2.3);
+// showDrives  = whether the 扫描盘 picker is visible (v2.25: LargeFiles /
+//               Apps / FolderTree — on the latter two it is the row's only
+//               control, left-aligned).
 void LayoutWindow(const UiHandles& ui, int clientW, int clientH,
-                  bool showSettings, bool showSearch = false);
+                  bool showSettings, bool showSearch = false,
+                  bool showDrives = false);
 
 // REVIEW-UI P2 (L-12): shared DPI scaling for callers outside this file
 // (column widths in Presenters/Controls, status-bar parts in MainWindow).

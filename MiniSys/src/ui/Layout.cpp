@@ -41,7 +41,7 @@ UINT WindowDpi(HWND hwnd) {
 int UiScale(HWND hwnd, int v) { return Scale(v, WindowDpi(hwnd)); }
 
 void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
-                  bool showSearch) {
+                  bool showSearch, bool showDrives) {
     UINT dpi = WindowDpi(ui.main);
 
     SendMessageW(ui.status, WM_SIZE, 0, 0);
@@ -95,7 +95,7 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
     // active (v2.3: the search box lives on the same row mechanism).
     const int editH = Scale(24, dpi);
     const int lblH  = Scale(22, dpi);
-    int settingsRowH = (showSettings || showSearch) ? (editH + pad) : 0;
+    int settingsRowH = (showSettings || showSearch || showDrives) ? (editH + pad) : 0;
     int settingsY = btnY + btnH + pad;
 
     if (showSearch) {
@@ -117,13 +117,16 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
                      qfX - pad - sx, editH, SWP_NOZORDER);
     }
 
+    const int drivesW = Scale(168, dpi);
+    if (showDrives && !showSettings) {
+        SetWindowPos(ui.btnDrives, nullptr, pad, settingsY, drivesW, editH, SWP_NOZORDER);
+    }
+
     if (showSettings) {
         const int editW   = Scale(70, dpi);
         const int editW2  = Scale(200, dpi);
-        const int editW3  = Scale(80, dpi);
         const int lblW1   = Scale(76, dpi);
         const int lblW2   = Scale(150, dpi);
-        const int lblW3   = Scale(190, dpi);
         int sx = pad;
         SetWindowPos(ui.lblMinSize,     nullptr, sx,                  settingsY+1, lblW1, lblH, SWP_NOZORDER);
         SetWindowPos(ui.editMinSize,    nullptr, sx+lblW1+pad,        settingsY,   editW, editH, SWP_NOZORDER);
@@ -132,8 +135,7 @@ void LayoutWindow(const UiHandles& ui, int W, int H, bool showSettings,
         SetWindowPos(ui.lblFileType,    nullptr, sx,                  settingsY+1, lblW2, lblH, SWP_NOZORDER);
         SetWindowPos(ui.editFileType,   nullptr, sx+lblW2+pad,        settingsY,   editW2, editH, SWP_NOZORDER);
         sx = sx + lblW2+pad+editW2+pad;
-        SetWindowPos(ui.lblDrives,      nullptr, sx,                  settingsY+1, lblW3, lblH, SWP_NOZORDER);
-        SetWindowPos(ui.editDrives,     nullptr, sx+lblW3+pad,        settingsY,   editW3, editH, SWP_NOZORDER);
+        SetWindowPos(ui.btnDrives,      nullptr, sx,                  settingsY,   drivesW, editH, SWP_NOZORDER);
     }
 
     int infoY = btnY + btnH + pad + settingsRowH;

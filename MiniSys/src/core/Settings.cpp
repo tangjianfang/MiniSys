@@ -34,7 +34,10 @@ Settings Settings::Load() {
     s.useSymlink = j.Get(L"useSymlink").AsBool(false);
     s.largeFilesMinMB = static_cast<int>(j.Get(L"largeFilesMinMB").AsInt(100));
     s.largeFilesExtFilter = j.Get(L"largeFilesExtFilter").AsString();
-    s.largeFilesDrives = j.Get(L"largeFilesDrives").AsString();
+    s.scanDrives = j.Get(L"scanDrives").AsString();
+    if (s.scanDrives.empty()) {
+        s.scanDrives = j.Get(L"largeFilesDrives").AsString();   // pre-v2.25
+    }
     // v2.9 session-restore fields.
     s.lastSearchQuery = j.Get(L"lastSearchQuery").AsString();
     s.searchMatchPath = j.Get(L"searchMatchPath").AsBool(false);
@@ -57,7 +60,7 @@ void Settings::Save() const {
     j.Set(L"useSymlink", Json(useSymlink));
     j.Set(L"largeFilesMinMB", Json(static_cast<double>(largeFilesMinMB)));
     j.Set(L"largeFilesExtFilter", Json(largeFilesExtFilter));
-    j.Set(L"largeFilesDrives", Json(largeFilesDrives));
+    j.Set(L"scanDrives", Json(scanDrives));
     j.Set(L"lastSearchQuery", Json(lastSearchQuery));
     j.Set(L"searchMatchPath", Json(searchMatchPath));
     j.Set(L"lastTab", Json(static_cast<double>(lastTab)));

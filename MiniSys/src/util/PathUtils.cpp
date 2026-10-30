@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -91,6 +92,50 @@ std::vector<std::wstring> EnumerateDrives() {
         }
     }
     return result;
+}
+
+std::vector<std::wstring> ParseDriveList(const std::wstring& text) {
+    std::vector<std::wstring> out;
+    auto flush = [&out](std::wstring& tok) {
+        if (tok.empty()) return;
+        const wchar_t c = tok[0];
+        bool ok = ((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z')) &&
+                  (tok.size() == 1 ||
+                   (tok[1] == L':' && (tok.size() == 2 ||
+                                       (tok.size() == 3 && tok[2] == L'\\'))));
+        if (ok) {
+            std::wstring root = { static_cast<wchar_t>(c & ~0x20), L':', L'\\' };
+            if (std::find(out.begin(), out.end(), root) == out.end())
+                out.push_back(std::move(root));
+        }
+        tok.clear();
+    };
+    std::wstring tok;
+    for (wchar_t ch : text) {
+        if (ch == L';' || ch == L',' || ch == L' ') flush(tok);
+        else tok += ch;
+    }
+    flush(tok);
+    return out;
+}
+
+std::wstring FormatDriveList(const std::vector<std::wstring>& roots) {
+    std::wstring s;
+    for (const auto& r : roots) {
+        if (r.empty()) continue;
+        if (!s.empty()) s += L';';
+        s += r[0];
+    }
+    return s;
+}
+
+bool IsOnAnyDrive(const fs::path& p, const std::vector<std::wstring>& roots) {
+    auto root = DriveRootOf(p);
+    if (root.empty()) return false;
+    for (const auto& r : roots) {
+        if (IEquals(root, r)) return true;
+    }
+    return false;
 }
 
 bool IsOnSystemDrive(const fs::path& p) {
